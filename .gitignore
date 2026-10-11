@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pyrogram session & runtime files
+*.session
+*.session-journal
+DreamXlogs.txt
+cinemagoer.db
+*.sqlite3
+*.pkl
+
+# Virtual environments & local env
+.env
+.venv/
+venv/
+ENV/

@@ -1,0 +1,83 @@
+{
+    "name": "Premium Guardian Bot",
+    "description": "High-speed Telegram Auto-Filter & File Delivery Bot with Automatic Telegram Stars Payment & Paywall.",
+    "stack": "heroku-24",
+    "website": "https://github.com/Unknown993/final-premium.git",
+    "repository": "https://github.com/Unknown993/final-premium.git",
+    "keywords": [
+      "telegram",
+      "auto-filter",
+      "telegram-stars",
+      "pyrogram",
+      "media",
+      "search"
+    ],
+    "env": {
+        "BOT_TOKEN": {
+            "description": "Your Telegram Bot Token from @BotFather.",
+            "required": true
+        },
+        "API_ID": {
+            "description": "Telegram API ID from https://my.telegram.org",
+            "required": true
+        },
+        "API_HASH": {
+            "description": "Telegram API Hash from https://my.telegram.org",
+            "required": true
+        },
+        "ADMINS": {
+            "description": "Admin Telegram User IDs separated by space.",
+            "required": true
+        },
+        "CHANNELS": {
+            "description": "Channel ID(s) for auto-indexing separated by space (e.g. -1001878553187).",
+            "required": false
+        },
+        "LOG_CHANNEL": {
+            "description": "Bot log channel ID starting with -100.",
+            "required": true
+        },
+        "PREMIUM_LOGS": {
+            "description": "Channel ID for automatic Telegram Stars payment logs (defaults to LOG_CHANNEL).",
+            "required": false
+        },
+        "PAYWALL_ENABLED": {
+            "description": "Set True to require a paid subscription for all users, or False for free access.",
+            "value": "False",
+            "required": false
+        },
+        "ULTRA_FAST_MODE": {
+            "description": "Set True for high-speed pagination without full-collection count scans.",
+            "value": "True",
+            "required": false
+        },
+        "DATABASE_URI": {
+            "description": "MongoDB URI (or 'local' for embedded fallback).",
+            "required": true
+        },
+        "DATABASE_URI2": {
+            "description": "Optional secondary MongoDB URI (only required if MULTIPLE_DB is True).",
+            "required": false
+        },
+        "DATABASE_NAME": {
+            "description": "MongoDB database name.",
+            "value": "Cluster0",
+            "required": false
+        },
+        "COLLECTION_NAME": {
+            "description": "MongoDB collection name for indexed media.",
+            "value": "royal_files",
+            "required": false
+        }
+    },
+    "addons": [],
+    "buildpacks": [{
+        "url": "heroku/python"
+    }],
+    "formation": {
+        "web": {
+            "quantity": 1,
+            "size": "eco"
+        }
+    }
+}

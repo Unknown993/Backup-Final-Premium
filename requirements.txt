@@ -1,0 +1,28 @@
+pyrofork==2.3.45
+tgcrypto-pyrofork
+pymongo>=4.9,<5.0
+motor==3.7.1
+marshmallow<4.0.0
+umongo
+mongomock
+mongomock-motor
+dnspython>=2.7.0,<3.0.0
+requests
+bs4
+shortzy
+pytz
+aiohttp
+aiofiles
+python-dotenv
+humanize
+Pillow
+psutil
+ujson
+jinja2
+pyromod
+fuzzywuzzy
+Levenshtein==0.24.0
+uvloop; sys_platform != 'win32'
+
+# Git-based Packages
+git+https://github.com/Joelkb/cinemagoer
