@@ -52,7 +52,7 @@ CHANNELS = [int(ch) if id_pattern.search(ch) else ch for ch in environ.get('CHAN
 
 LOG_CHANNEL = int(environ.get('LOG_CHANNEL', environ.get('STORAGE_CHANNEL_ID', '-1003753737791')))  # Log channel id (make sure bot is admin)
 BIN_CHANNEL = int(environ.get('BIN_CHANNEL', environ.get('STORAGE_CHANNEL_ID', '-1003753737791')))  # Bin channel id (make sure bot is admin)
-PREMIUM_LOGS = int(environ.get('PREMIUM_LOGS', environ.get('STORAGE_CHANNEL_ID', '-1001878553187')))  # Premium logs channel id
+PREMIUM_LOGS = int(environ.get('PREMIUM_LOGS', environ.get('STORAGE_CHANNEL_ID', '-1001003753737791')))  # Premium logs channel id
 DELETE_CHANNELS = [int(dch) if id_pattern.search(dch) else dch for dch in environ.get('DELETE_CHANNELS', '-100').split()] #(make sure bot is admin)
 support_chat_id = environ.get('SUPPORT_CHAT_ID', '-100')  # Support group id (make sure bot is admin)
 reqst_channel = environ.get('REQST_CHANNEL_ID', '-100')  # Request channel id (make sure bot is admin)
@@ -81,7 +81,7 @@ PAYWALL_ENABLED = is_enabled(environ.get('PAYWALL_ENABLED', 'False'), False)  # 
 # ============================
 # MongoDB Configuration
 # ============================
-DATABASE_URI = environ.get('DATABASE_URI', "mongodb+srv://siwach99152003_db_user:Vaoeia67tmtME5ga@cluster0.mrtqya3.mongodb.net/?appName=Cluster0")  # MongoDB URI for the database
+DATABASE_URI = environ.get('DATABASE_URI', "")  # MongoDB URI for the database
 DATABASE_NAME = environ.get('DATABASE_NAME', "Cluster0") # Database name (default: cluster)
 COLLECTION_NAME = environ.get('COLLECTION_NAME', 'royal_files') # Collection name (default: dreamcinezone_files)
 
