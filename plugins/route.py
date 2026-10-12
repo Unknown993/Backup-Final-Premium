@@ -1,6 +1,9 @@
 from aiohttp import web
 import re
 import math
+import hmac
+import hashlib
+import json
 import logging
 import secrets
 import time
@@ -16,6 +19,44 @@ from info import *
 
 
 routes = web.RouteTableDef()
+
+@routes.post("/razorpay/webhook")
+async def razorpay_webhook_handler(request: web.Request):
+    try:
+        raw_body = await request.read()
+        if RAZORPAY_WEBHOOK_SECRET:
+            signature = request.headers.get("X-Razorpay-Signature", "")
+            expected_sig = hmac.new(
+                RAZORPAY_WEBHOOK_SECRET.encode("utf-8"),
+                raw_body,
+                hashlib.sha256,
+            ).hexdigest()
+            if not hmac.compare_digest(signature, expected_sig):
+                return web.json_response({"ok": False, "error": "Invalid signature"}, status=400)
+
+        payload = json.loads(raw_body.decode("utf-8"))
+        event = payload.get("event", "")
+        if event in ("payment_link.paid", "payment.captured", "order.paid"):
+            plink_entity = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
+            payment_entity = payload.get("payload", {}).get("payment", {}).get("entity", {})
+            notes = plink_entity.get("notes") or payment_entity.get("notes") or {}
+            if isinstance(notes, dict) and notes.get("user_id"):
+                user_id = int(notes["user_id"])
+                amount_inr = int(notes.get("amount") or ((plink_entity.get("amount") or payment_entity.get("amount") or 0) // 100))
+                plink_id = plink_entity.get("id") or payment_entity.get("id") or ""
+                payment_id = payment_entity.get("id") or plink_id
+                from plugins.Premium import fulfill_razorpay_payment
+                await fulfill_razorpay_payment(
+                    client=dreamxbotz,
+                    plink_id=plink_id,
+                    user_id=user_id,
+                    amount_inr=amount_inr,
+                    payment_id=payment_id,
+                )
+        return web.json_response({"ok": True})
+    except Exception as e:
+        logging.error(f"Error in razorpay_webhook_handler: {e}")
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 @routes.get("/favicon.ico")
 async def favicon_route_handler(request):

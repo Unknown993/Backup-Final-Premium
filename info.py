@@ -63,18 +63,23 @@ auth_req_channels = environ.get("AUTH_REQ_CHANNELS", "-100")# requst to join Cha
 auth_channels     = environ.get("AUTH_CHANNELS", "-100")# Channels for force sub (make sure bot is admin)
 
 # ============================
-# Payment Configuration
+# Payment Configuration (Razorpay)
 # ============================
 QR_CODE = environ.get('QR_CODE', 'Your_Qr_Code')    # QR code image for payments
 OWNER_UPI_ID = environ.get('OWNER_UPI_ID', 'ɴᴏ ᴀᴠᴀɪʟᴀʙʟᴇ ʀɪɢʜᴛ ɴᴏᴡ')    # Owner UPI ID for payments
 
-STAR_PREMIUM_PLANS = {
-    10: "7day",
-    20: "15day",    
-    40: "1month", 
-    55: "45day",
-    75: "60day",
-}  # Premium plans with their respective durations in days
+RAZORPAY_KEY_ID = environ.get('RAZORPAY_KEY_ID', '')
+RAZORPAY_KEY_SECRET = environ.get('RAZORPAY_KEY_SECRET', '')
+RAZORPAY_WEBHOOK_SECRET = environ.get('RAZORPAY_WEBHOOK_SECRET', '')
+RAZORPAY_PROVIDER_TOKEN = environ.get('RAZORPAY_PROVIDER_TOKEN', '')
+
+RAZORPAY_PLANS = {
+    39: "7day",
+    59: "15day",
+    99: "1month",
+    149: "45day",
+    199: "60day",
+}  # Razorpay premium plans: amount in INR (₹) -> duration
 
 PAYWALL_ENABLED = is_enabled(environ.get('PAYWALL_ENABLED', 'False'), False)  # Toggle Paid-Members-Only mode (default: False)
 

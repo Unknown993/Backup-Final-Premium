@@ -3,6 +3,7 @@ import pytz
 import datetime
 import asyncio
 import logging
+import aiohttp
 from Script import script
 from info import *
 from utils import get_seconds, temp
@@ -20,6 +21,9 @@ from pyrogram.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# In-memory idempotency set for processed Razorpay payment links / payment IDs
+_PROCESSED_PAYMENTS = set()
 
 
 def format_plan_label(duration_str: str) -> str:
@@ -68,16 +72,16 @@ def get_ist_expiry_and_remaining(expiry: datetime.datetime):
     return expiry_str_in_ist, time_left_str, total_seconds
 
 
-def build_star_plan_buttons(include_extras: bool = True, back_callback: str = None) -> InlineKeyboardMarkup:
-    """Build one-tap automatic Telegram Stars purchase buttons for all plans."""
+def build_razorpay_plan_buttons(include_extras: bool = True, back_callback: str = None) -> InlineKeyboardMarkup:
+    """Build one-tap automatic Razorpay purchase buttons for all plans."""
     buttons = []
-    for stars in sorted(STAR_PREMIUM_PLANS.keys()):
-        raw_dur = STAR_PREMIUM_PLANS[stars]
+    for amount_inr in sorted(RAZORPAY_PLANS.keys()):
+        raw_dur = RAZORPAY_PLANS[amount_inr]
         label = format_plan_label(raw_dur)
         buttons.append([
             InlineKeyboardButton(
-                f"⭐ {label} Pʀᴇᴍɪᴜᴍ — {stars} Sᴛᴀʀꜱ",
-                callback_data=f"buy_{stars}",
+                f"💳 {label} Pʀᴇᴍɪᴜᴍ — ₹{amount_inr}",
+                callback_data=f"buy_{amount_inr}",
             )
         ])
 
@@ -99,10 +103,14 @@ def build_star_plan_buttons(include_extras: bool = True, back_callback: str = No
     return InlineKeyboardMarkup(buttons)
 
 
+# Alias for compatibility with other modules
+build_star_plan_buttons = build_razorpay_plan_buttons
+
+
 async def send_paywall_alert(client, chat_id: int, user_mention: str):
-    """Send paywall requirement prompt with automatic Telegram Stars buttons."""
+    """Send paywall requirement prompt with automatic Razorpay buttons."""
     caption = script.PAYWALL_ALERT_TEXT.format(user_mention)
-    markup = build_star_plan_buttons(include_extras=True)
+    markup = build_razorpay_plan_buttons(include_extras=True)
     try:
         await client.send_photo(
             chat_id=chat_id,
@@ -120,46 +128,324 @@ async def send_paywall_alert(client, chat_id: int, user_mention: str):
         )
 
 
-async def send_star_invoice(client, chat_id: int, user_id: int, amount: int) -> bool:
+async def create_razorpay_payment_link(user_id: int, amount_inr: int, readable_duration: str, raw_duration: str):
     """
-    Generate and send an automatic Telegram Stars (XTR) invoice to the specified chat.
-    Ensures the first button is an InlineKeyboardButtonBuy (pay=True).
+    Create a Razorpay Payment Link via Razorpay REST API (POST /v1/payment_links).
+    Returns dict with 'id', 'short_url', 'status' or None on failure.
     """
-    if amount not in STAR_PREMIUM_PLANS:
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
+        return None
+
+    ts = int(datetime.datetime.now().timestamp())
+    ref_id = f"rzp_{user_id}_{amount_inr}_{ts}"
+    payload = {
+        "amount": int(amount_inr) * 100,  # Amount in paise
+        "currency": "INR",
+        "accept_partial": False,
+        "description": f"VIP Premium Access ({readable_duration})",
+        "reference_id": ref_id,
+        "notes": {
+            "user_id": str(user_id),
+            "amount": str(amount_inr),
+            "duration": str(raw_duration),
+        },
+        "reminder_enable": False,
+    }
+
+    auth = aiohttp.BasicAuth(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
+    try:
+        async with aiohttp.ClientSession(auth=auth) as session:
+            async with session.post(
+                "https://api.razorpay.com/v1/payment_links",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status in (200, 201):
+                    return await resp.json()
+                err_txt = await resp.text()
+                logger.error(f"Razorpay create link failed ({resp.status}): {err_txt}")
+                return None
+    except Exception as e:
+        logger.error(f"Error creating Razorpay payment link: {e}")
+        return None
+
+
+async def check_razorpay_payment_link(plink_id: str):
+    """
+    Fetch status of a Razorpay Payment Link via GET /v1/payment_links/{plink_id}.
+    Returns the JSON dict or None on failure.
+    """
+    if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET or not plink_id:
+        return None
+
+    auth = aiohttp.BasicAuth(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
+    try:
+        async with aiohttp.ClientSession(auth=auth) as session:
+            async with session.get(
+                f"https://api.razorpay.com/v1/payment_links/{plink_id}",
+                timeout=aiohttp.ClientTimeout(total=12),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                return None
+    except Exception as e:
+        logger.error(f"Error checking Razorpay payment link {plink_id}: {e}")
+        return None
+
+
+async def fulfill_razorpay_payment(
+    client,
+    plink_id: str,
+    user_id: int,
+    amount_inr: int,
+    payment_id: str = "",
+    chat_id: int = None,
+    message_id: int = None,
+) -> bool:
+    """
+    Idempotently activate or extend premium subscription for a verified Razorpay payment.
+    Returns True if newly fulfilled, False if already processed or invalid.
+    """
+    user_id = int(user_id)
+    amount_inr = int(amount_inr)
+    unique_key = plink_id or payment_id
+    if not unique_key:
         return False
 
-    raw_duration = STAR_PREMIUM_PLANS[amount]
-    readable_duration = format_plan_label(raw_duration)
-    payload = f"dreamxpremium_{amount}_{user_id}_{int(datetime.datetime.now().timestamp())}"
+    if unique_key in _PROCESSED_PAYMENTS:
+        return False
 
-    buttons = [
-        [InlineKeyboardButtonBuy(text=f"⭐ Pay {amount} Stars")],
-        [InlineKeyboardButton("ᴄᴀɴᴄᴇʟ 🚫", callback_data="close_data")],
-    ]
-    reply_markup = InlineKeyboardMarkup(buttons)
+    # Check persistent DB record for idempotency
+    existing = await db.codes.find_one({"_id": f"rzp_{unique_key}"})
+    if existing:
+        _PROCESSED_PAYMENTS.add(unique_key)
+        return False
+
+    _PROCESSED_PAYMENTS.add(unique_key)
+    try:
+        await db.codes.insert_one({
+            "_id": f"rzp_{unique_key}",
+            "user_id": user_id,
+            "amount_inr": amount_inr,
+            "payment_id": payment_id,
+            "created_at": datetime.datetime.now(),
+        })
+    except Exception:
+        pass
+
+    if amount_inr in RAZORPAY_PLANS:
+        raw_time = RAZORPAY_PLANS[amount_inr]
+        plan_label = format_plan_label(raw_time)
+        seconds = await get_seconds(raw_time)
+    else:
+        days = max(1, int(amount_inr // 5))
+        plan_label = f"{days} Days"
+        seconds = days * 86400
+
+    if seconds <= 0:
+        return False
+
+    data = await db.add_or_extend_premium(
+        user_id=user_id,
+        seconds=seconds,
+        amount_paid=amount_inr,
+        plan_name=plan_label,
+    )
+    expiry = data.get("expiry_time")
+    expiry_str_in_ist, time_left_str, _ = get_ist_expiry_and_remaining(expiry)
 
     try:
-        await client.send_invoice(
-            chat_id=chat_id,
-            title=f"⭐ VIP Premium ({readable_duration})",
-            description=(
-                f"Instant automatic activation of {readable_duration} Premium Access "
-                f"(Direct files, No verification, Ad-free, High-speed streaming)."
+        user_obj = await client.get_users(user_id)
+        user_mention = user_obj.mention
+    except Exception:
+        user_mention = f"<code>{user_id}</code>"
+
+    time_zone = datetime.datetime.now(pytz.timezone("Asia/Kolkata"))
+    current_time = time_zone.strftime("%d-%m-%Y | %I:%M:%S %p")
+    txn_display = payment_id or plink_id
+
+    receipt_text = (
+        f"🎉 <b>ʀᴀᴢᴏʀᴘᴀʏ ᴘᴀʏᴍᴇɴᴛ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ! ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴀᴛᴇᴅ ✅</b>\n\n"
+        f"👋 ᴛʜᴀɴᴋ ʏᴏᴜ {user_mention}, ʏᴏᴜʀ ʀᴀᴢᴏʀᴘᴀʏ ᴘᴀʏᴍᴇɴᴛ ʜᴀꜱ ʙᴇᴇɴ ᴠᴇʀɪꜰɪᴇᴅ!\n\n"
+        f"📦 <b>ᴘʟᴀɴ :</b> <code>{plan_label}</code>\n"
+        f"💳 <b>ᴀᴍᴏᴜɴᴛ ᴘᴀɪᴅ :</b> <code>₹{amount_inr}</code>\n"
+        f"⏰ <b>ᴛɪᴍᴇ ʟᴇꜰᴛ :</b> <code>{time_left_str}</code>\n"
+        f"⌛️ <b>ᴇxᴘɪʀʏ ᴅᴀᴛᴇ :</b> {expiry_str_in_ist}\n"
+        f"🔖 <b>ᴘᴀʏᴍᴇɴᴛ ɪᴅ :</b> <code>{txn_display}</code>\n\n"
+        f"🚀 <i>ᴇɴᴊᴏʏ ʏᴏᴜʀ ᴜɴʟɪᴍɪᴛᴇᴅ ᴀᴅ-ꜰʀᴇᴇ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇꜱꜱ!</i>"
+    )
+    receipt_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 ᴠɪᴇᴡ ᴍʏ ᴘʟᴀɴ", callback_data="myplan_cb")]
+    ])
+
+    target_chat = chat_id or user_id
+    sent_receipt = False
+    if chat_id and message_id:
+        try:
+            await client.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=receipt_text,
+                reply_markup=receipt_markup,
+                parse_mode=enums.ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            sent_receipt = True
+        except Exception:
+            pass
+
+    if not sent_receipt:
+        try:
+            await client.send_message(
+                chat_id=target_chat,
+                text=receipt_text,
+                reply_markup=receipt_markup,
+                parse_mode=enums.ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to send Razorpay receipt to {target_chat}: {e}")
+
+    try:
+        await client.send_message(
+            PREMIUM_LOGS,
+            text=(
+                f"#Purchase_Premium_With_Razorpay\n\n"
+                f"👤 ᴜꜱᴇʀ - {user_mention}\n"
+                f"⚡ ᴜꜱᴇʀ ɪᴅ - <code>{user_id}</code>\n"
+                f"💳 ᴀᴍᴏᴜɴᴛ ᴘᴀɪᴅ - <code>₹{amount_inr}</code>\n"
+                f"⏰ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇꜱꜱ - <code>{plan_label}</code>\n"
+                f"⏳ ᴊᴏɪɴɪɴɢ ᴅᴀᴛᴇ - {current_time}\n"
+                f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ - {expiry_str_in_ist}\n"
+                f"🔖 ᴘᴀʏᴍᴇɴᴛ ɪᴅ - <code>{txn_display}</code>"
             ),
-            payload=payload,
-            currency="XTR",
-            prices=[
-                LabeledPrice(
-                    label=f"Premium ({readable_duration})",
-                    amount=amount,
-                )
-            ],
-            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+    except Exception as log_err:
+        logger.warning(f"Failed to send Razorpay log to PREMIUM_LOGS: {log_err}")
+
+    return True
+
+
+async def _auto_poll_razorpay_link(client, plink_id: str, user_id: int, amount_inr: int, chat_id: int, message_id: int):
+    """
+    Background task that polls Razorpay payment link status every 5 seconds for up to 10 minutes
+    and automatically activates the user's subscription as soon as status == 'paid'.
+    """
+    for _ in range(120):
+        await asyncio.sleep(5)
+        if plink_id in _PROCESSED_PAYMENTS:
+            return
+        info = await check_razorpay_payment_link(plink_id)
+        if not info:
+            continue
+        status = str(info.get("status", "")).lower()
+        if status == "paid":
+            payments = info.get("payments") or []
+            payment_id = ""
+            if payments and isinstance(payments, list) and isinstance(payments[0], dict):
+                payment_id = payments[0].get("payment_id", "") or ""
+            await fulfill_razorpay_payment(
+                client=client,
+                plink_id=plink_id,
+                user_id=user_id,
+                amount_inr=amount_inr,
+                payment_id=payment_id,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            return
+        if status in ("cancelled", "expired"):
+            return
+
+
+async def send_razorpay_payment(client, chat_id: int, user_id: int, amount: int) -> bool:
+    """
+    Generate and send a Razorpay payment checkout to the specified chat.
+    1. If RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET are set: Creates a Razorpay Payment Link
+       with automatic background verification + 1-tap verify button.
+    2. Else if RAZORPAY_PROVIDER_TOKEN is set: Sends a native Telegram invoice in INR via Razorpay provider.
+    """
+    if amount not in RAZORPAY_PLANS:
+        return False
+
+    raw_duration = RAZORPAY_PLANS[amount]
+    readable_duration = format_plan_label(raw_duration)
+
+    # Option 1: Razorpay Payment Links API (RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET)
+    if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET:
+        link_data = await create_razorpay_payment_link(
+            user_id=user_id,
+            amount_inr=amount,
+            readable_duration=readable_duration,
+            raw_duration=raw_duration,
+        )
+        if not link_data or not link_data.get("short_url"):
+            return False
+
+        plink_id = link_data["id"]
+        short_url = link_data["short_url"]
+
+        buttons = [
+            [InlineKeyboardButton(f"💳 ᴘᴀʏ ₹{amount} ᴠɪᴀ ʀᴀᴢᴏʀᴘᴀʏ", url=short_url)],
+            [InlineKeyboardButton("🔄 ᴠᴇʀɪꜰʏ ᴘᴀʏᴍᴇɴᴛ ꜱᴛᴀᴛᴜꜱ", callback_data=f"rzp_verify#{plink_id}#{amount}#{user_id}")],
+            [InlineKeyboardButton("🚫 ᴄᴀɴᴄᴇʟ", callback_data="close_data")],
+        ]
+        msg = await client.send_message(
+            chat_id=chat_id,
+            text=(
+                f"💳 <b><u>ʀᴀᴢᴏʀᴘᴀʏ ɪɴꜱᴛᴀɴᴛ ᴄʜᴇᴄᴋᴏᴜᴛ</u></b>\n\n"
+                f"📦 <b>ᴘʟᴀɴ :</b> <code>{readable_duration} Pʀᴇᴍɪᴜᴍ</code>\n"
+                f"💰 <b>ᴀᴍᴏᴜɴᴛ :</b> <code>₹{amount}</code>\n"
+                f"🆔 <b>ᴏʀᴅᴇʀ ɪᴅ :</b> <code>{plink_id}</code>\n\n"
+                f"1️⃣ ᴛᴀᴘ <b>💳 ᴘᴀʏ ₹{amount} ᴠɪᴀ ʀᴀᴢᴏʀᴘᴀʏ</b> ʙᴇʟᴏᴡ ᴛᴏ ᴘᴀʏ ᴜꜱɪɴɢ ᴜᴘɪ, ɢᴘᴀʏ, ᴘʜᴏɴᴇᴘᴇ, ᴘᴀʏᴛᴍ, ᴏʀ ᴄᴀʀᴅ.\n"
+                f"2️⃣ ʏᴏᴜʀ ᴘʀᴇᴍɪᴜᴍ ᴡɪʟʟ ᴀᴄᴛɪᴠᴀᴛᴇ <b>ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ</b> within seconds of payment (or tap <b>🔄 ᴠᴇʀɪꜰʏ ᴘᴀʏᴍᴇɴᴛ ꜱᴛᴀᴛᴜꜱ</b>)."
+            ),
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode=enums.ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        asyncio.create_task(
+            _auto_poll_razorpay_link(client, plink_id, user_id, amount, chat_id, msg.id)
         )
         return True
-    except Exception as e:
-        logger.error(f"Error sending Star invoice to {chat_id}: {e}")
-        return False
+
+    # Option 2: Native Telegram Invoice via BotFather RAZORPAY_PROVIDER_TOKEN
+    if RAZORPAY_PROVIDER_TOKEN:
+        payload = f"dreamxrazorpay_{amount}_{user_id}_{int(datetime.datetime.now().timestamp())}"
+        buttons = [
+            [InlineKeyboardButtonBuy(text=f"💳 Pay ₹{amount} via Razorpay")],
+            [InlineKeyboardButton("ᴄᴀɴᴄᴇʟ 🚫", callback_data="close_data")],
+        ]
+        try:
+            await client.send_invoice(
+                chat_id=chat_id,
+                title=f"💳 VIP Premium ({readable_duration})",
+                description=(
+                    f"Instant automatic activation of {readable_duration} Premium Access "
+                    f"via Razorpay (Direct files, No verification, Ad-free)."
+                ),
+                payload=payload,
+                provider_token=RAZORPAY_PROVIDER_TOKEN,
+                currency="INR",
+                prices=[
+                    LabeledPrice(
+                        label=f"Premium ({readable_duration})",
+                        amount=int(amount) * 100,
+                    )
+                ],
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error sending Razorpay provider invoice to {chat_id}: {e}")
+            return False
+
+    return False
+
+
+# Alias for compatibility with commands.py
+send_star_invoice = send_razorpay_payment
 
 
 # =============================================================================
@@ -206,13 +492,13 @@ async def myplan(client, message):
             expiry_str_in_ist, time_left_str, total_secs = get_ist_expiry_and_remaining(expiry)
             if total_secs > 0:
                 plan_name = data.get("plan_name", "VIP Premium")
-                stars_paid = data.get("stars_paid", 0)
+                amount_paid = data.get("amount_paid", 0)
                 caption = (
                     f"⚜️ <b>ᴘʀᴇᴍɪᴜᴍ ᴜꜱᴇʀ ᴅᴀᴛᴀ :</b>\n\n"
                     f"👤 <b>ᴜꜱᴇʀ :</b> {user}\n"
                     f"⚡ <b>ᴜꜱᴇʀ ɪᴅ :</b> <code>{user_id}</code>\n"
                     f"📦 <b>ᴘʟᴀɴ :</b> <code>{plan_name}</code>\n"
-                    f"⭐ <b>ꜱᴛᴀʀꜱ ᴘᴀɪᴅ :</b> <code>{stars_paid}</code>\n"
+                    f"💳 <b>ᴀᴍᴏᴜɴᴛ ᴘᴀɪᴅ :</b> <code>₹{amount_paid}</code>\n"
                     f"⏰ <b>ᴛɪᴍᴇ ʟᴇꜰᴛ :</b> {time_left_str}\n"
                     f"⌛️ <b>ᴇxᴘɪʀʏ ᴅᴀᴛᴇ :</b> {expiry_str_in_ist}"
                 )
@@ -221,7 +507,7 @@ async def myplan(client, message):
                     photo=SUBSCRIPTION,
                     caption=caption,
                     reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🔥 ᴇxᴛᴇɴᴅ ᴘʟᴀɴ (ᴀᴜᴛᴏ-ᴘᴀʏ)", callback_data="star_info")]]
+                        [[InlineKeyboardButton("🔥 ᴇxᴛᴇɴᴅ ᴘʟᴀɴ (ʀᴀᴢᴏʀᴘᴀʏ)", callback_data="star_info")]]
                     ),
                 )
                 return
@@ -231,9 +517,9 @@ async def myplan(client, message):
             caption=(
                 f"<b>ʜᴇʏ {user},\n\n"
                 f"ʏᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ ᴀɴ ᴀᴄᴛɪᴠᴇ ᴘʀᴇᴍɪᴜᴍ ᴘʟᴀɴ.\n"
-                f"ꜱᴇʟᴇᴄᴛ ᴀ ᴘʟᴀɴ ʙᴇʟᴏᴡ ꜰᴏʀ ɪɴꜱᴛᴀɴᴛ ᴀᴜᴛᴏᴍᴀᴛɪᴄ ᴀᴄᴛɪᴠᴀᴛɪᴏɴ ᴠɪᴀ ᴛᴇʟᴇɢʀᴀᴍ ꜱᴛᴀʀꜱ ⭐!</b>"
+                f"ꜱᴇʟᴇᴄᴛ ᴀ ᴘʟᴀɴ ʙᴇʟᴏᴡ ꜰᴏʀ ɪɴꜱᴛᴀɴᴛ ᴀᴜᴛᴏᴍᴀᴛɪᴄ ᴀᴄᴛɪᴠᴀᴛɪᴏɴ ᴠɪᴀ ʀᴀᴢᴏʀᴘᴀʏ 💳!</b>"
             ),
-            reply_markup=build_star_plan_buttons(include_extras=False),
+            reply_markup=build_razorpay_plan_buttons(include_extras=False),
         )
     except Exception as e:
         logger.error(f"Error in myplan: {e}")
@@ -251,18 +537,18 @@ async def myplan_callback(client, query: CallbackQuery):
             expiry_str_in_ist, time_left_str, total_secs = get_ist_expiry_and_remaining(expiry)
             if total_secs > 0:
                 plan_name = data.get("plan_name", "VIP Premium")
-                stars_paid = data.get("stars_paid", 0)
+                amount_paid = data.get("amount_paid", 0)
                 caption = (
                     f"⚜️ <b>ᴘʀᴇᴍɪᴜᴍ ᴜꜱᴇʀ ᴅᴀᴛᴀ :</b>\n\n"
                     f"👤 <b>ᴜꜱᴇʀ :</b> {user}\n"
                     f"⚡ <b>ᴜꜱᴇʀ ɪᴅ :</b> <code>{user_id}</code>\n"
                     f"📦 <b>ᴘʟᴀɴ :</b> <code>{plan_name}</code>\n"
-                    f"⭐ <b>ꜱᴛᴀʀꜱ ᴘᴀɪᴅ :</b> <code>{stars_paid}</code>\n"
+                    f"💳 <b>ᴀᴍᴏᴜɴᴛ ᴘᴀɪᴅ :</b> <code>₹{amount_paid}</code>\n"
                     f"⏰ <b>ᴛɪᴍᴇ ʟᴇꜰᴛ :</b> {time_left_str}\n"
                     f"⌛️ <b>ᴇxᴘɪʀʏ ᴅᴀᴛᴇ :</b> {expiry_str_in_ist}"
                 )
                 markup = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔥 ᴇxᴛᴇɴᴅ ᴘʟᴀɴ", callback_data="star_info")],
+                    [InlineKeyboardButton("🔥 ᴇxᴛᴇɴᴅ ᴘʟᴀɴ (ʀᴀᴢᴏʀᴘᴀʏ)", callback_data="star_info")],
                     [InlineKeyboardButton("⇋ ʙᴀᴄᴋ ⇋", callback_data="premium_info")],
                 ])
                 try:
@@ -280,9 +566,9 @@ async def myplan_callback(client, query: CallbackQuery):
         caption = (
             f"<b>ʜᴇʏ {user},\n\n"
             f"ʏᴏᴜ ᴅᴏɴ'ᴛ ʜᴀᴠᴇ ᴀɴ ᴀᴄᴛɪᴠᴇ ᴘʀᴇᴍɪᴜᴍ ᴘʟᴀɴ.\n"
-            f"ꜱᴇʟᴇᴄᴛ ᴀ ᴘʟᴀɴ ʙᴇʟᴏᴡ ꜰᴏʀ ɪɴꜱᴛᴀɴᴛ ᴀᴜᴛᴏᴍᴀᴛɪᴄ ᴀᴄᴛɪᴠᴀᴛɪᴏɴ ᴠɪᴀ ᴛᴇʟᴇɢʀᴀᴍ ꜱᴛᴀʀꜱ ⭐!</b>"
+            f"ꜱᴇʟᴇᴄᴛ ᴀ ᴘʟᴀɴ ʙᴇʟᴏᴡ ꜰᴏʀ ɪɴꜱᴛᴀɴᴛ ᴀᴜᴛᴏᴍᴀᴛɪᴄ ᴀᴄᴛɪᴠᴀᴛɪᴏɴ ᴠɪᴀ ʀᴀᴢᴏʀᴘᴀʏ 💳!</b>"
         )
-        markup = build_star_plan_buttons(include_extras=False, back_callback="premium_info")
+        markup = build_razorpay_plan_buttons(include_extras=False, back_callback="premium_info")
         try:
             await client.edit_message_media(
                 chat_id=query.message.chat.id,
@@ -315,13 +601,13 @@ async def get_premium(client, message):
             expiry = data.get("expiry_time")
             expiry_str_in_ist, time_left_str, _ = get_ist_expiry_and_remaining(expiry)
             plan_name = data.get("plan_name", "VIP")
-            stars_paid = data.get("stars_paid", 0)
+            amount_paid = data.get("amount_paid", 0)
             await message.reply_text(
                 f"⚜️ ᴘʀᴇᴍɪᴜᴍ ᴜꜱᴇʀ ᴅᴀᴛᴀ :\n\n"
                 f"👤 ᴜꜱᴇʀ : {mention}\n"
                 f"⚡ ᴜꜱᴇʀ ɪᴅ : <code>{user_id}</code>\n"
                 f"📦 ᴘʟᴀɴ : <code>{plan_name}</code>\n"
-                f"⭐ ꜱᴛᴀʀꜱ ᴘᴀɪᴅ : <code>{stars_paid}</code>\n"
+                f"💳 ᴀᴍᴏᴜɴᴛ ᴘᴀɪᴅ : <code>₹{amount_paid}</code>\n"
                 f"⏰ ᴛɪᴍᴇ ʟᴇꜰᴛ : {time_left_str}\n"
                 f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ : {expiry_str_in_ist}"
             )
@@ -353,7 +639,7 @@ async def give_premium_cmd_handler(client, message):
             data = await db.add_or_extend_premium(
                 user_id=user_id,
                 seconds=seconds,
-                stars_paid=0,
+                amount_paid=0,
                 plan_name=f"Admin Grant ({time_str})",
             )
             expiry = data.get("expiry_time")
@@ -477,7 +763,7 @@ async def paywall_command(client, message):
         await message.reply_text(
             "🔒 <b>ᴘᴀʏᴡᴀʟʟ ᴇɴᴀʙʟᴇᴅ !</b>\n\n"
             "ᴛʜᴇ ʙᴏᴛ ɪꜱ ɴᴏᴡ ɪɴ <b>ᴘᴀɪᴅ ᴍᴇᴍʙᴇʀꜱ ᴏɴʟʏ</b> ᴍᴏᴅᴇ. "
-            "ɴᴏɴ-ᴘʀᴇᴍɪᴜᴍ ᴜꜱᴇʀꜱ ᴡɪʟʟ ʙᴇ ᴘʀᴏᴍᴘᴛᴇᴅ ᴛᴏ ꜱᴜʙꜱᴄʀɪʙᴇ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ᴡɪᴛʜ ᴛᴇʟᴇɢʀᴀᴍ ꜱᴛᴀʀꜱ ⭐.",
+            "ɴᴏɴ-ᴘʀᴇᴍɪᴜᴍ ᴜꜱᴇʀꜱ ᴡɪʟʟ ʙᴇ ᴘʀᴏᴍᴘᴛᴇᴅ ᴛᴏ ꜱᴜʙꜱᴄʀɪʙᴇ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ᴡɪᴛʜ ʀᴀᴢᴏʀᴘᴀʏ 💳.",
             parse_mode=enums.ParseMode.HTML,
         )
     elif arg in ("off", "disable", "false", "0"):
@@ -528,7 +814,7 @@ async def paywall_callback_handler(client, query: CallbackQuery):
 
 
 # =============================================================================
-# User Plan Command & Automatic Telegram Star Payment Handlers
+# User Plan Command & Automatic Razorpay Payment Handlers
 # =============================================================================
 
 @Client.on_message(filters.command(["plan", "plans", "buy", "vip"]))
@@ -539,7 +825,7 @@ async def plan(client, message):
         f"<b><u>💎 ᴛʜɪs ᴜsᴇʀ ᴄʜᴇᴄᴋᴇᴅ /plan</u> {temp.B_LINK}\n\n"
         f"- ɪᴅ - `{user_id}`\n- ɴᴀᴍᴇ - {users}</b>"
     )
-    reply_markup = build_star_plan_buttons(include_extras=True)
+    reply_markup = build_razorpay_plan_buttons(include_extras=True)
     msg = await message.reply_photo(
         photo="https://graph.org/file/86da2027469565b5873d6.jpg",
         caption=script.BPREMIUM_TXT,
@@ -562,47 +848,101 @@ async def plan(client, message):
 async def premium_button(client, callback_query: CallbackQuery):
     try:
         amount = int(callback_query.data.split("_")[1])
-        if amount not in STAR_PREMIUM_PLANS:
+        if amount not in RAZORPAY_PLANS:
             await callback_query.answer("⚠️ Invalid Premium Package.", show_alert=True)
             return
 
         user_id = callback_query.from_user.id
         chat_type = callback_query.message.chat.type if callback_query.message else enums.ChatType.PRIVATE
 
-        # If triggered inside a group, send the invoice to user's private chat or redirect to PM
+        if not RAZORPAY_KEY_ID and not RAZORPAY_PROVIDER_TOKEN:
+            await callback_query.answer(
+                "⚠️ Razorpay credentials (RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET) are not configured yet.",
+                show_alert=True,
+            )
+            return
+
+        # If triggered inside a group, send the Razorpay checkout to user's PM or redirect to PM
         if chat_type != enums.ChatType.PRIVATE:
-            sent = await send_star_invoice(client, user_id, user_id, amount)
+            sent = await send_razorpay_payment(client, user_id, user_id, amount)
             if sent:
-                await callback_query.answer("📩 Invoice sent to your Private Messages (PM)!", show_alert=True)
+                await callback_query.answer("📩 Razorpay payment link sent to your Private Messages (PM)!", show_alert=True)
             else:
                 bot_username = temp.U_NAME or (await client.get_me()).username
                 pm_url = f"https://t.me/{bot_username}?start=buy_{amount}"
                 await callback_query.answer()
                 await callback_query.message.reply_text(
-                    "<b>💳 <u>ᴄᴏᴍᴘʟᴇᴛᴇ ᴘᴀʏᴍᴇɴᴛ ɪɴ ᴘᴍ</u>\n\n"
-                    "ᴛᴀᴘ ᴛʜᴇ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ᴏᴘᴇɴ ʏᴏᴜʀ ɪɴꜱᴛᴀɴᴛ ᴛᴇʟᴇɢʀᴀᴍ ꜱᴛᴀʀꜱ ɪɴᴠᴏɪᴄᴇ ɪɴ ᴘʀɪᴠᴀᴛᴇ ᴄʜᴀᴛ:</b>",
+                    "<b>💳 <u>ᴄᴏᴍᴘʟᴇᴛᴇ ʀᴀᴢᴏʀᴘᴀʏ ᴘᴀʏᴍᴇɴᴛ ɪɴ ᴘᴍ</u>\n\n"
+                    "ᴛᴀᴘ ᴛʜᴇ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴛᴏ ᴏᴘᴇɴ ʏᴏᴜʀ ɪɴꜱᴛᴀɴᴛ ʀᴀᴢᴏʀᴘᴀʏ ᴄʜᴇᴄᴋᴏᴜᴛ ɪɴ ᴘʀɪᴠᴀᴛᴇ ᴄʜᴀᴛ:</b>",
                     reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"⭐ Pay {amount} Stars in PM", url=pm_url)]
+                        [InlineKeyboardButton(f"💳 Pay ₹{amount} via Razorpay in PM", url=pm_url)]
                     ]),
                     parse_mode=enums.ParseMode.HTML,
                 )
             return
 
         target_chat_id = callback_query.message.chat.id if callback_query.message else user_id
-        sent = await send_star_invoice(client, target_chat_id, user_id, amount)
+        sent = await send_razorpay_payment(client, target_chat_id, user_id, amount)
         if sent:
             await callback_query.answer()
         else:
-            await callback_query.answer("🚫 Error Processing Your Payment. Try again.", show_alert=True)
+            await callback_query.answer("🚫 Error creating Razorpay payment link. Please check Razorpay API keys.", show_alert=True)
     except Exception as e:
         logger.error(f"Error In buy_ callback: {e}")
         await callback_query.answer("🚫 Error Processing Your Payment. Try again.", show_alert=True)
 
 
+@Client.on_callback_query(filters.regex(r"^rzp_verify#"), group=-1)
+async def razorpay_verify_callback(client, query: CallbackQuery):
+    """Handle manual 1-tap verification of a Razorpay Payment Link."""
+    try:
+        parts = query.data.split("#")
+        plink_id = parts[1]
+        amount_inr = int(parts[2])
+        target_user_id = int(parts[3]) if len(parts) > 3 else query.from_user.id
+
+        if query.from_user.id != target_user_id and query.from_user.id not in ADMINS:
+            return await query.answer("⚠️ This payment link belongs to another user.", show_alert=True)
+
+        if plink_id in _PROCESSED_PAYMENTS:
+            return await query.answer("✅ Payment already verified and Premium activated!", show_alert=True)
+
+        info = await check_razorpay_payment_link(plink_id)
+        if not info:
+            return await query.answer("⚠️ Could not reach Razorpay right now. Please try again in a moment.", show_alert=True)
+
+        status = str(info.get("status", "")).lower()
+        if status == "paid":
+            payments = info.get("payments") or []
+            payment_id = ""
+            if payments and isinstance(payments, list) and isinstance(payments[0], dict):
+                payment_id = payments[0].get("payment_id", "") or ""
+            await query.answer("✅ Payment verified! Activating Premium...", show_alert=True)
+            await fulfill_razorpay_payment(
+                client=client,
+                plink_id=plink_id,
+                user_id=target_user_id,
+                amount_inr=amount_inr,
+                payment_id=payment_id,
+                chat_id=query.message.chat.id if query.message else target_user_id,
+                message_id=query.message.id if query.message else None,
+            )
+        elif status in ("cancelled", "expired"):
+            await query.answer(f"❌ This payment link has {status}. Please generate a new one via /plan.", show_alert=True)
+        else:
+            await query.answer(
+                "⏳ Payment not completed yet. Complete the payment via the Razorpay link first, then tap Verify!",
+                show_alert=True,
+            )
+    except Exception as e:
+        logger.error(f"Error in razorpay_verify_callback: {e}")
+        await query.answer("⚠️ Error checking payment status.", show_alert=True)
+
+
 @Client.on_pre_checkout_query()
 async def pre_checkout_handler(client, query: PreCheckoutQuery):
     try:
-        if query.payload and query.payload.startswith("dreamxpremium_"):
+        if query.payload and query.payload.startswith("dreamxrazorpay_"):
             await query.answer(success=True)
         else:
             await query.answer(success=False, error="⚠️ Invalid Purchase Type.")
@@ -616,73 +956,26 @@ async def pre_checkout_handler(client, query: PreCheckoutQuery):
 
 @Client.on_message(filters.successful_payment)
 async def successful_premium_payment(client, message):
+    """Handle native Telegram INR invoice payments via Razorpay provider token."""
     try:
         payment = message.successful_payment
-        amount = int(payment.total_amount)
-        charge_id = getattr(payment, "telegram_payment_charge_id", "N/A") or "N/A"
+        # Telegram INR invoices report total_amount in paise (100 paise = ₹1)
+        raw_total = int(payment.total_amount)
+        amount_inr = raw_total // 100 if payment.currency == "INR" else raw_total
+        charge_id = (
+            getattr(payment, "provider_payment_charge_id", "")
+            or getattr(payment, "telegram_payment_charge_id", "N/A")
+            or "N/A"
+        )
         user_id = message.from_user.id
-        user_mention = message.from_user.mention if message.from_user else f"<code>{user_id}</code>"
-        time_zone = datetime.datetime.now(pytz.timezone("Asia/Kolkata"))
-        current_time = time_zone.strftime("%d-%m-%Y | %I:%M:%S %p")
-
-        if amount in STAR_PREMIUM_PLANS:
-            raw_time = STAR_PREMIUM_PLANS[amount]
-            plan_label = format_plan_label(raw_time)
-            seconds = await get_seconds(raw_time)
-        else:
-            # Fallback automatic calculation if custom star amount
-            days = max(1, int(amount * 0.7))
-            raw_time = f"{days}day"
-            plan_label = f"{days} Days"
-            seconds = days * 86400
-
-        if seconds > 0:
-            data = await db.add_or_extend_premium(
-                user_id=user_id,
-                seconds=seconds,
-                stars_paid=amount,
-                plan_name=plan_label,
-            )
-            expiry = data.get("expiry_time")
-            expiry_str_in_ist, time_left_str, _ = get_ist_expiry_and_remaining(expiry)
-
-            await message.reply_text(
-                text=(
-                    f"🎉 <b>ᴘᴀʏᴍᴇɴᴛ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ! ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴀᴛᴇᴅ ✅</b>\n\n"
-                    f"👋 ᴛʜᴀɴᴋ ʏᴏᴜ {user_mention}, ʏᴏᴜʀ ᴀᴜᴛᴏᴍᴀᴛɪᴄ ᴘᴀʏᴍᴇɴᴛ ʜᴀꜱ ʙᴇᴇɴ ᴠᴇʀɪꜰɪᴇᴅ!\n\n"
-                    f"📦 <b>ᴘʟᴀɴ :</b> <code>{plan_label}</code>\n"
-                    f"⭐ <b>ꜱᴛᴀʀꜱ ᴘᴀɪᴅ :</b> <code>{amount} ⭐</code>\n"
-                    f"⏰ <b>ᴛɪᴍᴇ ʟᴇꜰᴛ :</b> <code>{time_left_str}</code>\n"
-                    f"⌛️ <b>ᴇxᴘɪʀʏ ᴅᴀᴛᴇ :</b> {expiry_str_in_ist}\n"
-                    f"🔖 <b>ᴛʀᴀɴꜱᴀᴄᴛɪᴏɴ ɪᴅ :</b> <code>{charge_id}</code>\n\n"
-                    f"🚀 <i>ᴇɴᴊᴏʏ ʏᴏᴜʀ ᴜɴʟɪᴍɪᴛᴇᴅ ᴀᴅ-ꜰʀᴇᴇ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇꜱꜱ!</i>"
-                ),
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("👤 ᴠɪᴇᴡ ᴍʏ ᴘʟᴀɴ", callback_data="myplan_cb")]
-                ]),
-                disable_web_page_preview=True,
-                parse_mode=enums.ParseMode.HTML,
-            )
-
-            try:
-                await client.send_message(
-                    PREMIUM_LOGS,
-                    text=(
-                        f"#Purchase_Premium_With_Star\n\n"
-                        f"👤 ᴜꜱᴇʀ - {user_mention}\n"
-                        f"⚡ ᴜꜱᴇʀ ɪᴅ - <code>{user_id}</code>\n"
-                        f"⭐ ꜱᴛᴀʀ ᴘᴀʏ - <code>{amount}⭐</code>\n"
-                        f"⏰ ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴄᴇꜱꜱ - <code>{plan_label}</code>\n"
-                        f"⏳ ᴊᴏɪɴɪɴɢ ᴅᴀᴛᴇ - {current_time}\n"
-                        f"⌛️ ᴇxᴘɪʀʏ ᴅᴀᴛᴇ - {expiry_str_in_ist}\n"
-                        f"🔖 ᴄʜᴀʀɢᴇ ɪᴅ - <code>{charge_id}</code>"
-                    ),
-                    disable_web_page_preview=True,
-                )
-            except Exception as log_err:
-                logger.warning(f"Failed to send payment log to PREMIUM_LOGS: {log_err}")
-        else:
-            await message.reply_text("⚠️ Invalid Premium Time.")
+        await fulfill_razorpay_payment(
+            client=client,
+            plink_id=charge_id,
+            user_id=user_id,
+            amount_inr=amount_inr,
+            payment_id=charge_id,
+            chat_id=message.chat.id,
+        )
     except Exception as e:
-        logger.error(f"Error Processing Premium Payment: {e}")
+        logger.error(f"Error Processing Razorpay Provider Payment: {e}")
         await message.reply_text("✅ Thank You For Your Payment! Your subscription is being processed.")

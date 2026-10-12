@@ -202,15 +202,15 @@ async def start(client, message):
         return
 
     if len(message.command) == 2 and message.command[1].startswith("buy_"):
-        from .Premium import send_star_invoice, build_star_plan_buttons
+        from .Premium import send_razorpay_payment, build_razorpay_plan_buttons
         try:
             amount = int(message.command[1].split("_")[1])
-            sent = await send_star_invoice(client, message.chat.id, message.from_user.id, amount)
+            sent = await send_razorpay_payment(client, message.chat.id, message.from_user.id, amount)
             if sent:
                 return
         except Exception:
             pass
-        reply_markup = build_star_plan_buttons(include_extras=True)
+        reply_markup = build_razorpay_plan_buttons(include_extras=True)
         await message.reply_photo(
             photo=(SUBSCRIPTION),
             caption=script.PREPLANS_TXT.format(message.from_user.mention),
@@ -220,8 +220,8 @@ async def start(client, message):
         return
 
     if len(message.command) == 2 and message.command[1] in ["premium", "plan", "plans", "vip", "buy"]:
-        from .Premium import build_star_plan_buttons
-        reply_markup = build_star_plan_buttons(include_extras=True)
+        from .Premium import build_razorpay_plan_buttons
+        reply_markup = build_razorpay_plan_buttons(include_extras=True)
         await message.reply_photo(
             photo=(SUBSCRIPTION),
             caption=script.PREPLANS_TXT.format(message.from_user.mention),

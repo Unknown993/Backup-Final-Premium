@@ -1,13 +1,13 @@
 {
     "name": "Premium Guardian Bot",
-    "description": "High-speed Telegram Auto-Filter & File Delivery Bot with Automatic Telegram Stars Payment & Paywall.",
+    "description": "High-speed Telegram Auto-Filter & File Delivery Bot with Automatic Razorpay Payment & Paywall.",
     "stack": "heroku-24",
     "website": "https://github.com/Unknown993/final-premium.git",
     "repository": "https://github.com/Unknown993/final-premium.git",
     "keywords": [
       "telegram",
       "auto-filter",
-      "telegram-stars",
+      "razorpay",
       "pyrogram",
       "media",
       "search"
@@ -29,6 +29,18 @@
             "description": "Admin Telegram User IDs separated by space.",
             "required": true
         },
+        "RAZORPAY_KEY_ID": {
+            "description": "Razorpay API Key ID (from Razorpay Dashboard -> Settings -> API Keys).",
+            "required": false
+        },
+        "RAZORPAY_KEY_SECRET": {
+            "description": "Razorpay API Key Secret (from Razorpay Dashboard -> Settings -> API Keys).",
+            "required": false
+        },
+        "RAZORPAY_WEBHOOK_SECRET": {
+            "description": "Optional Razorpay Webhook Secret for /razorpay/webhook verification.",
+            "required": false
+        },
         "CHANNELS": {
             "description": "Channel ID(s) for auto-indexing separated by space (e.g. -1001878553187).",
             "required": false
@@ -38,7 +50,7 @@
             "required": true
         },
         "PREMIUM_LOGS": {
-            "description": "Channel ID for automatic Telegram Stars payment logs (defaults to LOG_CHANNEL).",
+            "description": "Channel ID for automatic Razorpay payment logs (defaults to LOG_CHANNEL).",
             "required": false
         },
         "PAYWALL_ENABLED": {

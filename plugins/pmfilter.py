@@ -842,7 +842,7 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
 @Client.on_callback_query()
 async def cb_handler(client: Client, query: CallbackQuery):
     DreamxData = query.data
-    if DreamxData and (DreamxData.startswith(("buy_", "paywall_")) or DreamxData == "myplan_cb"):
+    if DreamxData and (DreamxData.startswith(("buy_", "paywall_", "rzp_verify#")) or DreamxData == "myplan_cb"):
         return
     if query.data == "close_data":
         try:
@@ -1598,11 +1598,11 @@ async def cb_handler(client: Client, query: CallbackQuery):
     elif query.data == "premium_info":
         try:
             from plugins.Premium import format_plan_label
-            star_rows = [
-                [InlineKeyboardButton(f"⭐ {format_plan_label(duration)} Pʀᴇᴍɪᴜᴍ — {stars} Sᴛᴀʀꜱ", callback_data=f"buy_{stars}")]
-                for stars, duration in STAR_PREMIUM_PLANS.items()
+            rzp_rows = [
+                [InlineKeyboardButton(f"💳 {format_plan_label(duration)} Pʀᴇᴍɪᴜᴍ — ₹{amount}", callback_data=f"buy_{amount}")]
+                for amount, duration in RAZORPAY_PLANS.items()
             ]
-            btn = star_rows + [
+            btn = rzp_rows + [
                 [
                     InlineKeyboardButton('• ʀᴇꜰᴇʀ ꜰʀɪᴇɴᴅꜱ', callback_data='reffff'),
                     InlineKeyboardButton('ꜰʀᴇᴇ ᴛʀɪᴀʟ •', callback_data='give_trial')
@@ -1629,14 +1629,14 @@ async def cb_handler(client: Client, query: CallbackQuery):
     elif query.data == "buy_info":
         try:
             from plugins.Premium import format_plan_label
-            star_rows = [
-                [InlineKeyboardButton(f"⭐ {format_plan_label(duration)} Pʀᴇᴍɪᴜᴍ — {stars} Sᴛᴀʀꜱ", callback_data=f"buy_{stars}")]
-                for stars, duration in STAR_PREMIUM_PLANS.items()
+            rzp_rows = [
+                [InlineKeyboardButton(f"💳 {format_plan_label(duration)} Pʀᴇᴍɪᴜᴍ — ₹{amount}", callback_data=f"buy_{amount}")]
+                for amount, duration in RAZORPAY_PLANS.items()
             ]
-            btn = star_rows + [
+            btn = rzp_rows + [
                 [
-                    InlineKeyboardButton('⭐ sᴛᴀʀs ɪɴꜰᴏ', callback_data='star_info'),
-                    InlineKeyboardButton('💳 ᴜᴘɪ', callback_data='upi_info')
+                    InlineKeyboardButton('💳 ʀᴀᴢᴏʀᴘᴀʏ ɪɴꜰᴏ', callback_data='star_info'),
+                    InlineKeyboardButton('🏦 ᴜᴘɪ', callback_data='upi_info')
                 ],
                 [
                     InlineKeyboardButton('⇋ ʙᴀᴄᴋ ᴛᴏ ᴘʀᴇᴍɪᴜᴍ ⇋', callback_data='premium_info')
@@ -1655,7 +1655,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
     elif query.data == "upi_info":
         try:
             btn = [[
-                InlineKeyboardButton('⭐ ɪɴsᴛᴀɴᴛ ᴀᴜᴛᴏ-ʙᴜʏ (ᴛᴇʟᴇɢʀᴀᴍ sᴛᴀʀs)', callback_data='star_info'),
+                InlineKeyboardButton('💳 ɪɴsᴛᴀɴᴛ ᴀᴜᴛᴏ-ʙᴜʏ (ʀᴀᴢᴏʀᴘᴀʏ)', callback_data='star_info'),
             ],[
                 InlineKeyboardButton('• ꜱᴇɴᴅ  ᴘᴀʏᴍᴇɴᴛ ꜱᴄʀᴇᴇɴꜱʜᴏᴛ •', url=OWNER_LNK),
             ],[
@@ -1671,23 +1671,23 @@ async def cb_handler(client: Client, query: CallbackQuery):
         except Exception as e:
             logging.exception("Exception in 'upi_info' callback")
 
-    elif query.data == "star_info":
+    elif query.data in ("star_info", "razorpay_info"):
         try:
             from plugins.Premium import format_plan_label
             buttons = [
-                [InlineKeyboardButton(f"⭐ {format_plan_label(days)} Pʀᴇᴍɪᴜᴍ — {stars} Sᴛᴀʀꜱ", callback_data=f"buy_{stars}")]
-                for stars, days in STAR_PREMIUM_PLANS.items()
+                [InlineKeyboardButton(f"💳 {format_plan_label(days)} Pʀᴇᴍɪᴜᴍ — ₹{amount}", callback_data=f"buy_{amount}")]
+                for amount, days in RAZORPAY_PLANS.items()
             ]
             buttons.append([InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data="buy_info")])
             reply_markup = InlineKeyboardMarkup(buttons)
             await client.edit_message_media(
                 chat_id=query.message.chat.id,
                 message_id=query.message.id,
-                media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.PREMIUM_STAR_TEXT, parse_mode=enums.ParseMode.HTML),
+                media=InputMediaPhoto(media=SUBSCRIPTION, caption=script.PREMIUM_RAZORPAY_TEXT, parse_mode=enums.ParseMode.HTML),
                 reply_markup=reply_markup
             )
         except Exception as e:
-            logging.exception("Exception in 'star' callback")
+            logging.exception("Exception in 'razorpay_info' callback")
 
 
     elif query.data.startswith("grp_pm"):

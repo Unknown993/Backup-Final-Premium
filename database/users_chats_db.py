@@ -329,15 +329,16 @@ class Database:
             await self.users.update_one({"id": user_id}, {"$set": {"expiry_time": None}})
         return False
 
-    async def add_or_extend_premium(self, user_id: int, seconds: int, stars_paid: int = 0, plan_name: str = "Premium"):
+    async def add_or_extend_premium(self, user_id: int, seconds: int, amount_paid: int = 0, stars_paid: int = 0, plan_name: str = "Premium"):
         """Add a new premium subscription or extend an existing active subscription."""
         user_id = int(user_id)
+        paid_val = int(amount_paid or stars_paid or 0)
         now = datetime.datetime.now()
         user_data = await self.get_user(user_id)
         base_time = now
-        prev_stars = 0
+        prev_paid = 0
         if user_data:
-            prev_stars = int(user_data.get("stars_paid", 0) or 0)
+            prev_paid = int(user_data.get("amount_paid", 0) or 0)
             existing_expiry = user_data.get("expiry_time")
             if isinstance(existing_expiry, datetime.datetime):
                 if existing_expiry.tzinfo is not None:
@@ -346,12 +347,12 @@ class Database:
                     base_time = existing_expiry
 
         new_expiry = base_time + datetime.timedelta(seconds=seconds)
-        total_stars = prev_stars + int(stars_paid)
+        total_paid = prev_paid + paid_val
         updated_fields = {
             "id": user_id,
             "expiry_time": new_expiry,
             "plan_name": plan_name,
-            "stars_paid": total_stars,
+            "amount_paid": total_paid,
         }
         await self.update_user(updated_fields)
         return await self.get_user(user_id) or updated_fields
