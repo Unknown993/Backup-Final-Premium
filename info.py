@@ -24,8 +24,8 @@ def is_enabled(value, default):
 # Bot Information Configuration
 # ============================
 SESSION = environ.get('SESSION', 'royal_search')   # Session name for the bot
-API_ID = int(environ.get('API_ID', environ.get('TELEGRAM_API_ID', '33668278'))) # API ID from my.telegram.org
-API_HASH = environ.get('API_HASH', environ.get('TELEGRAM_API_HASH', '7535a85449d73ed7a62a471cff78af73'))  # API Hash from my.telegram.org
+API_ID = int(environ.get('API_ID', environ.get('TELEGRAM_API_ID', ''))) # API ID from my.telegram.org
+API_HASH = environ.get('API_HASH', environ.get('TELEGRAM_API_HASH', ''))  # API Hash from my.telegram.org
 BOT_TOKEN = environ.get('BOT_TOKEN', '')    # Bot token from @BotFather
 
 # ============================
@@ -47,8 +47,8 @@ FSUB_PICS = (environ.get('FSUB_PICS', 'https://graph.org/file/7478ff3eac37f4329c
 # ============================
 # Admin, Channels & Users Configuration
 # ============================
-ADMINS = [int(admin) if id_pattern.search(admin) else admin for admin in environ.get('ADMINS', environ.get('DEVELOPER_ID', '8371005605')).split()] # Replace with the actual admin ID(s) to add
-CHANNELS = [int(ch) if id_pattern.search(ch) else ch for ch in environ.get('CHANNELS', environ.get('STORAGE_CHANNEL_ID', '-1001878553187')).split()]  # Channel id for auto indexing (make sure bot is admin)
+ADMINS = [int(admin) if id_pattern.search(admin) else admin for admin in environ.get('ADMINS', environ.get('DEVELOPER_ID', '')).split()] # Replace with the actual admin ID(s) to add
+CHANNELS = [int(ch) if id_pattern.search(ch) else ch for ch in environ.get('CHANNELS', environ.get('STORAGE_CHANNEL_ID', '')).split()]  # Channel id for auto indexing (make sure bot is admin)
 
 LOG_CHANNEL = int(environ.get('LOG_CHANNEL', environ.get('STORAGE_CHANNEL_ID', '-1003753737791')))  # Log channel id (make sure bot is admin)
 BIN_CHANNEL = int(environ.get('BIN_CHANNEL', environ.get('STORAGE_CHANNEL_ID', '-1003753737791')))  # Bin channel id (make sure bot is admin)
