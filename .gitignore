@@ -6,6 +6,7 @@ __pycache__/
 # Pyrogram session & runtime files
 *.session
 *.session-journal
+*.log
 DreamXlogs.txt
 cinemagoer.db
 *.sqlite3

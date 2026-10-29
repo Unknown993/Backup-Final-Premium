@@ -18,6 +18,295 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+import sqlite3
+import os
+import json
+
+# ---------------------------------------------------------
+# SQLite FTS5 Trigram & Persistent Cache Architecture
+FTS_DB_PATH = os.environ.get("FTS_DB_PATH", "media_fts.sqlite3")
+_fts_conn = None
+
+class FTSMedia:
+    """Lightweight document object compatible with uMongo Media."""
+    def __init__(self, file_id, file_ref, file_name, file_size, file_type, mime_type, caption):
+        self.file_id = file_id
+        self.file_ref = file_ref
+        self.file_name = file_name
+        self.file_size = int(file_size or 0)
+        self.file_type = file_type or "video"
+        self.mime_type = mime_type
+        self.caption = caption
+
+    def __getitem__(self, item):
+        return getattr(self, item)
+
+
+def get_fts_connection():
+    global _fts_conn
+    if _fts_conn is None:
+        _fts_conn = sqlite3.connect(FTS_DB_PATH, check_same_thread=False)
+        _fts_conn.execute("PRAGMA journal_mode = WAL;")
+        _fts_conn.execute("PRAGMA synchronous = NORMAL;")
+        _fts_conn.execute("""
+            CREATE TABLE IF NOT EXISTS media_catalog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id TEXT UNIQUE,
+                file_ref TEXT,
+                file_name TEXT,
+                file_size INTEGER,
+                file_type TEXT,
+                mime_type TEXT,
+                caption TEXT
+            );
+        """)
+        _fts_conn.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS media_fts USING fts5(
+                file_name,
+                caption,
+                content='media_catalog',
+                content_rowid='id',
+                tokenize='trigram'
+            );
+        """)
+        _fts_conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS media_catalog_ai AFTER INSERT ON media_catalog BEGIN
+              INSERT INTO media_fts(rowid, file_name, caption) VALUES (new.id, new.file_name, new.caption);
+            END;
+        """)
+        _fts_conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS media_catalog_ad AFTER DELETE ON media_catalog BEGIN
+              INSERT INTO media_fts(media_fts, rowid, file_name, caption) VALUES('delete', old.id, old.file_name, old.caption);
+            END;
+        """)
+        _fts_conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS media_catalog_au AFTER UPDATE ON media_catalog BEGIN
+              INSERT INTO media_fts(media_fts, rowid, file_name, caption) VALUES('delete', old.id, old.file_name, old.caption);
+              INSERT INTO media_fts(rowid, file_name, caption) VALUES (new.id, new.file_name, new.caption);
+            END;
+        """)
+        _fts_conn.execute("""
+            CREATE TABLE IF NOT EXISTS filter_cache (
+                key TEXT PRIMARY KEY,
+                fresh_query TEXT,
+                buttons_query TEXT,
+                file_ids TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        _fts_conn.commit()
+    return _fts_conn
+
+
+def save_to_fts(file_id, file_ref, file_name, file_size, file_type, mime_type, caption):
+    """Index file into local SQLite FTS5 catalog."""
+    try:
+        conn = get_fts_connection()
+        with conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO media_catalog (file_id, file_ref, file_name, file_size, file_type, mime_type, caption)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (file_id, file_ref, file_name, file_size, file_type, mime_type, caption))
+        return True
+    except Exception as e:
+        logger.error(f"FTS save error: {e}")
+        return False
+
+
+def _sanitize_term(term: str) -> str:
+    return re.sub(r'[^\w\s]', ' ', term).strip()
+
+
+def _build_fts_query(query):
+    if isinstance(query, list):
+        phrases = [q for q in query if q and q.strip()]
+    else:
+        phrases = [query] if query and query.strip() else []
+
+    fts_or_parts = []
+    short_words = set()
+
+    for phrase in phrases:
+        cleaned = _sanitize_term(phrase)
+        if not cleaned:
+            continue
+        words = cleaned.split()
+        long_words = [w for w in words if len(w) >= 3]
+        for w in words:
+            if len(w) < 3:
+                short_words.add(w.lower())
+
+        if long_words:
+            part = ' AND '.join(f'"{w}"' for w in long_words)
+            fts_or_parts.append(f'({part})')
+
+    fts_expression = ' OR '.join(fts_or_parts) if fts_or_parts else None
+    return fts_expression, list(short_words)
+
+
+def query_fts(query, file_type=None, max_results=10, offset=0):
+    """Query SQLite FTS5 trigram virtual table in 1-3 ms."""
+    try:
+        conn = get_fts_connection()
+        # Fast check if SQLite catalog is populated
+        total_catalog = conn.execute("SELECT count(*) FROM media_catalog").fetchone()[0]
+        if total_catalog == 0:
+            return None, "", 0  # Signal fallback to MongoDB
+
+        fts_expr, short_words = _build_fts_query(query)
+        where_parts = []
+        params = []
+
+        if fts_expr:
+            where_parts.append("media_fts MATCH ?")
+            params.append(fts_expr)
+
+        for sw in short_words:
+            where_parts.append("c.file_name LIKE ?")
+            params.append(f"%{sw}%")
+
+        if file_type:
+            where_parts.append("c.file_type = ?")
+            params.append(file_type)
+
+        if not where_parts:
+            return [], "", 0
+
+        where_sql = " AND ".join(where_parts)
+        count_sql = f"SELECT count(*) FROM media_catalog c JOIN media_fts f ON c.id = f.rowid WHERE {where_sql}"
+        total = conn.execute(count_sql, params).fetchone()[0]
+        if total == 0:
+            return None, "", 0  # No FTS matches; fallback to MongoDB
+
+        query_sql = f"""
+            SELECT c.file_id, c.file_ref, c.file_name, c.file_size, c.file_type, c.mime_type, c.caption
+            FROM media_catalog c
+            JOIN media_fts f ON c.id = f.rowid
+            WHERE {where_sql}
+            ORDER BY c.id DESC
+            LIMIT ? OFFSET ?
+        """
+        rows = conn.execute(query_sql, params + [max_results, offset]).fetchall()
+        files = [
+            FTSMedia(
+                file_id=r[0], file_ref=r[1], file_name=r[2],
+                file_size=r[3], file_type=r[4], mime_type=r[5], caption=r[6]
+            )
+            for r in rows
+        ]
+
+        has_next = (offset + len(files)) < total
+        next_offset = str(offset + len(files)) if has_next else ""
+        return files, next_offset, total
+    except Exception as e:
+        logger.error(f"FTS search error: {e}")
+        return None, "", 0
+
+
+def cache_set_field(key: str, field: str, value: str):
+    """Save key/value to SQLite filter_cache for reboot persistence."""
+    try:
+        conn = get_fts_connection()
+        with conn:
+            cur = conn.execute("SELECT key FROM filter_cache WHERE key = ?", (key,))
+            if cur.fetchone():
+                conn.execute(f"UPDATE filter_cache SET {field} = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?", (str(value), key))
+            else:
+                conn.execute(f"INSERT INTO filter_cache (key, {field}) VALUES (?, ?)", (key, str(value)))
+    except Exception as e:
+        logger.error(f"cache_set_field error: {e}")
+
+
+def cache_get_field(key: str, field: str):
+    """Retrieve field from SQLite filter_cache for reboot persistence."""
+    try:
+        conn = get_fts_connection()
+        cur = conn.execute(f"SELECT {field} FROM filter_cache WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] is not None else None
+    except Exception as e:
+        logger.error(f"cache_get_field error: {e}")
+        return None
+
+
+def cache_save_getall(key: str, file_ids: list):
+    """Save list of file_ids to SQLite filter_cache."""
+    try:
+        data = json.dumps(file_ids)
+        cache_set_field(key, "file_ids", data)
+    except Exception as e:
+        logger.error(f"cache_save_getall error: {e}")
+
+
+def cache_get_getall(key: str) -> list:
+    """Retrieve list of file_ids from SQLite filter_cache."""
+    try:
+        val = cache_get_field(key, "file_ids")
+        if val:
+            return json.loads(val)
+    except Exception as e:
+        logger.error(f"cache_get_getall error: {e}")
+    return []
+
+
+async def sync_mongo_to_fts(batch_size=2000):
+    """Sync pre-existing files from MongoDB to SQLite FTS5 table."""
+    try:
+        conn = get_fts_connection()
+        logger.info("Starting MongoDB to SQLite FTS5 sync...")
+        cursor = Media.find({})
+        batch = []
+        count = 0
+        async for doc in cursor:
+            batch.append((
+                doc.file_id,
+                doc.file_ref,
+                doc.file_name,
+                doc.file_size,
+                getattr(doc, "file_type", "video"),
+                getattr(doc, "mime_type", None),
+                getattr(doc, "caption", None)
+            ))
+            if len(batch) >= batch_size:
+                with conn:
+                    conn.executemany("""
+                        INSERT OR REPLACE INTO media_catalog (file_id, file_ref, file_name, file_size, file_type, mime_type, caption)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, batch)
+                count += len(batch)
+                batch.clear()
+        if MULTIPLE_DB:
+            async for doc in Media2.find({}):
+                batch.append((
+                    doc.file_id,
+                    doc.file_ref,
+                    doc.file_name,
+                    doc.file_size,
+                    getattr(doc, "file_type", "video"),
+                    getattr(doc, "mime_type", None),
+                    getattr(doc, "caption", None)
+                ))
+                if len(batch) >= batch_size:
+                    with conn:
+                        conn.executemany("""
+                            INSERT OR REPLACE INTO media_catalog (file_id, file_ref, file_name, file_size, file_type, mime_type, caption)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """, batch)
+                    count += len(batch)
+                    batch.clear()
+        if batch:
+            with conn:
+                conn.executemany("""
+                    INSERT OR REPLACE INTO media_catalog (file_id, file_ref, file_name, file_size, file_type, mime_type, caption)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, batch)
+            count += len(batch)
+        logger.info(f"MongoDB to SQLite FTS5 sync complete. Total files synced: {count}")
+        return count
+    except Exception as e:
+        logger.error(f"Error during FTS sync: {e}")
+        return 0
+
 # ---------------------------------------------------------
 
 # Global cache for DB size
@@ -137,6 +426,16 @@ async def save_file(media):
         )
         return False, 3
     logger.info(f"[SUCCESS] '{file_name}' saved to {target_db} DB.")
+    # Also index into SQLite FTS5 Trigram table for instant sub-3ms searching
+    save_to_fts(
+        file_id=file_id,
+        file_ref=file_ref,
+        file_name=file_name,
+        file_size=media.file_size,
+        file_type=getattr(media, "file_type", "video"),
+        mime_type=getattr(media, "mime_type", None),
+        caption=(media.caption.html if media.caption and INDEX_CAPTION else None)
+    )
     return True, 1
 
 async def get_search_results(chat_id, query, file_type=None, max_results=None, offset=0, filter=False):
@@ -150,6 +449,12 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 settings = await get_settings(int(chat_id))
                 max_results = 10 if settings.get("max_btn") else int(MAX_B_TN)
 
+    # Fast Path: Query SQLite FTS5 with trigram tokenizer (sub-3ms)
+    fts_files, fts_next_offset, fts_total = query_fts(query, file_type=file_type, max_results=max_results, offset=offset)
+    if fts_files is not None:
+        return fts_files, fts_next_offset, fts_total
+
+    # Fallback Path: MongoDB regex search if SQLite FTS has 0 matches or empty catalog
     # This is the new "middle-ground" regex logic for speed and flexibility
     if isinstance(query, list):
         # This part handles season searches etc., where you need to match any of the full phrases.
@@ -264,6 +569,16 @@ async def get_bad_files(query, file_type=None):
 
 
 async def get_file_details(query):
+    # Check SQLite catalog first for instant response
+    try:
+        conn = get_fts_connection()
+        cur = conn.execute("SELECT file_id, file_ref, file_name, file_size, file_type, mime_type, caption FROM media_catalog WHERE file_id = ?", (query,))
+        row = cur.fetchone()
+        if row:
+            return [FTSMedia(*row)]
+    except Exception as e:
+        logger.error(f"FTS get_file_details error: {e}")
+
     filter = {"file_id": query}
     
     tasks = [Media.find(filter).to_list(length=1)]

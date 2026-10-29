@@ -122,6 +122,10 @@ async def dreamxbotz_start():
     else:
         print("Single DB Mode On! Files will be saved in the first DB.")
 
+    # Background sync MongoDB to SQLite FTS5 Trigram
+    from database.ia_filterdb import sync_mongo_to_fts
+    asyncio.create_task(sync_mongo_to_fts())
+
     # Store bot information.
     me = await dreamxbotz.get_me()
 
