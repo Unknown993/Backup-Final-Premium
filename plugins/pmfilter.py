@@ -93,66 +93,160 @@ LANGUAGE_ALIASES = {
 }
 
 
+
+# Conversational Greeting & Chat Filter Blocklist
+CHAT_IGNORE_WORDS = frozenset({
+    "hi", "hello", "helo", "hey", "hii", "hiii", "hlo", "hlw", "yo", "sup",
+    "gm", "gn", "ga", "ge", "good morning", "good night", "good evening", "good afternoon",
+    "bye", "tata", "cya", "see you", "tc", "take care",
+    "ok", "okay", "okk", "k", "kk", "done", "alright", "fine", "yep", "yes", "no", "nah",
+    "thanks", "thank you", "thx", "tq", "dhanyawad", "shukriya", "welcome", "wc",
+    "pls", "plz", "please", "help", "admin", "owner", "mod",
+    "how are you", "how r u", "kya haal", "kya haal hai", "sab badhiya",
+    "lol", "lmao", "rofl", "haha", "hahaha", "xd",
+    "nice", "super", "cool", "great", "awesome", "mast", "badhiya", "op",
+    "bro", "bhai", "bhaiya", "yaar", "yr", "buddy", "dude", "sir", "mam", "boss",
+    "kaise ho", "kya hua", "kaha ho", "kya kar rahe ho", "kuch nahi", "kuch nhi",
+    "bolo", "haan", "han", "nahi", "nhi", "sahi hai", "theek hai", "thik hai"
+})
+
+CHAT_SINGLE_WORDS = frozenset({
+    "hi", "hello", "helo", "hey", "hii", "hiii", "hlo", "hlw", "yo", "sup",
+    "gm", "gn", "bye", "tata", "cya", "tc", "ok", "okay", "okk", "k", "kk",
+    "done", "fine", "yep", "yes", "no", "nah", "thanks", "thx", "tq", "welcome",
+    "wc", "pls", "plz", "please", "help", "admin", "owner", "mod", "lol", "lmao",
+    "rofl", "haha", "hahaha", "xd", "nice", "super", "cool", "great", "awesome",
+    "mast", "op", "bro", "bhai", "bhaiya", "yaar", "yr", "buddy", "dude", "sir",
+    "mam", "boss", "bolo", "haan", "han", "nahi", "nhi"
+})
+
+def is_conversational_chat(text: str) -> bool:
+    if not text:
+        return True
+    clean = re.sub(r"[^\w\s]", "", text.strip().lower())
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        return True
+    if clean in CHAT_IGNORE_WORDS:
+        return True
+    if len(clean) <= 2 and clean not in {"4k", "2k", "3d", "hd", "sd"}:
+        return True
+    words = clean.split()
+    if words and all(w in CHAT_SINGLE_WORDS for w in words):
+        return True
+    return False
+
 def format_button_label(file_name: str, file_size: int, max_len: int = 58) -> str:
-    """Improvement 1 & 3: Format file buttons with frontloaded metadata badges."""
+    """Format file buttons strictly in order: Size, Quality, Language, Title."""
     fn = str(file_name or "")
-    
-    # Extract Quality badge
+    size_str = get_size(file_size)
     quality = ""
-    q_match = re.search(r'\b(2160p|4k|1080p|720p|480p|360p|hd|fhd|uhd)\b', fn, re.I)
+    q_match = re.search(r"\b(2160p|4k|1080p|720p|480p|360p|hd|fhd|uhd)\b", fn, re.I)
     if q_match:
         val = q_match.group(1).upper()
         quality = "4K" if val in ("4K", "2160P") else val
-
-    # Extract Language / Audio badge
-    audio = ""
-    if re.search(r'\b(dual(\s*audio)?)\b', fn, re.I):
-        audio = "Dual"
-    elif re.search(r'\b(multi(\s*audio)?)\b', fn, re.I):
-        audio = "Multi"
-    elif re.search(r'\b(hindi|hin)\b', fn, re.I):
-        audio = "Hin"
-    elif re.search(r'\b(english|eng)\b', fn, re.I):
-        audio = "Eng"
-    elif re.search(r'\b(tamil|tam)\b', fn, re.I):
-        audio = "Tam"
-    elif re.search(r'\b(telugu|tel)\b', fn, re.I):
-        audio = "Tel"
-    elif re.search(r'\b(malayalam|mal)\b', fn, re.I):
-        audio = "Mal"
-    elif re.search(r'\b(kannada|kan)\b', fn, re.I):
-        audio = "Kan"
-
-    # Extract Season / Episode badge
     se_badge = ""
-    se_match = re.search(r'\b(S\d{1,2}(?:\s*E\d{1,2})?|Season\s*\d{1,2})\b', fn, re.I)
+    se_match = re.search(r"\b(S\d{1,2}(?:\s*E\d{1,2})?|Season\s*\d{1,2})\b", fn, re.I)
     if se_match:
         se_badge = se_match.group(1).replace(" ", "").upper()
-
-    size_str = get_size(file_size)
-
-    badges = []
+    audio = ""
+    if re.search(r"\b(dual(\s*audio)?)\b", fn, re.I):
+        audio = "Dual"
+    elif re.search(r"\b(multi(\s*audio)?)\b", fn, re.I):
+        audio = "Multi"
+    elif re.search(r"\b(hindi|hin)\b", fn, re.I):
+        audio = "Hin"
+    elif re.search(r"\b(english|eng)\b", fn, re.I):
+        audio = "Eng"
+    elif re.search(r"\b(tamil|tam)\b", fn, re.I):
+        audio = "Tam"
+    elif re.search(r"\b(telugu|tel)\b", fn, re.I):
+        audio = "Tel"
+    elif re.search(r"\b(malayalam|mal)\b", fn, re.I):
+        audio = "Mal"
+    elif re.search(r"\b(kannada|kan)\b", fn, re.I):
+        audio = "Kan"
+    badges = [size_str]
     if quality:
         badges.append(quality)
     if se_badge:
         badges.append(se_badge)
     if audio:
         badges.append(audio)
-    badges.append(size_str)
-    
-    badge_str = f"[{' • '.join(badges)}]"
-    
-    clean_title = re.sub(r'\.(mkv|mp4|avi|webm)$', '', fn, flags=re.I)
-    clean_title = re.sub(r'\[.*?\]|\(.*?\)', ' ', clean_title)
-    clean_title = re.sub(r'[@_#\-\.]+', ' ', clean_title)
-    clean_title = re.sub(r'\s+', ' ', clean_title).strip()
-    
+    badge_str = f"[{chr(8226).join([chr(32) + b + chr(32) for b in badges]).strip()}]"
+    clean_title = re.sub(r"\.(mkv|mp4|avi|webm)$", "", fn, flags=re.I)
+    clean_title = re.sub(r"\[.*?\]|\(.*?\)", " ", clean_title)
+    clean_title = re.sub(r"[@_#\-\.]+", " ", clean_title)
+    clean_title = re.sub(r"\s+", " ", clean_title).strip()
     avail_len = max_len - len(badge_str) - 2
     if avail_len > 10 and len(clean_title) > avail_len:
         clean_title = clean_title[:avail_len - 1] + "…"
-        
     return f"{badge_str} {clean_title}"
 
+import itertools
+ACTIVE_FILTERS = {}
+
+def get_active_filters(key: str) -> dict:
+    if key in ACTIVE_FILTERS:
+        return ACTIVE_FILTERS[key]
+    val = cache_get_field(str(key), "buttons_query")
+    if val and val.startswith("{") and val.endswith("}"):
+        try:
+            d = json.loads(val)
+            ACTIVE_FILTERS[key] = d
+            return d
+        except Exception:
+            pass
+    return {}
+
+def set_active_filter(key: str, filter_type: str, value: str):
+    f = get_active_filters(key).copy()
+    if value == "homepage" or value is None:
+        f.pop(filter_type, None)
+    else:
+        f[filter_type] = value
+    ACTIVE_FILTERS[key] = f
+    cache_set_field(str(key), "buttons_query", json.dumps(f))
+    return f
+
+def clear_active_filters(key: str):
+    ACTIVE_FILTERS.pop(key, None)
+    cache_set_field(str(key), "buttons_query", "{}")
+
+def get_filter_chip_label(active_filters: dict) -> str:
+    chips = []
+    if "season" in active_filters:
+        chips.append(f"S{int(active_filters['season']):02d}")
+    if "quality" in active_filters:
+        chips.append(active_filters["quality"].upper())
+    if "language" in active_filters:
+        chips.append(active_filters["language"].title())
+    return " • ".join(chips) if chips else None
+
+def build_combined_filter_queries(base_search: str, filters_dict: dict):
+    if not filters_dict:
+        return base_search
+    q_aliases = [None]
+    if "quality" in filters_dict:
+        q_val = filters_dict["quality"].lower()
+        q_aliases = QUALITY_ALIASES.get(q_val, [q_val])
+    l_aliases = [None]
+    if "language" in filters_dict:
+        l_val = filters_dict["language"].lower()
+        l_aliases = LANGUAGE_ALIASES.get(l_val, [l_val])
+    s_variations = [None]
+    if "season" in filters_dict:
+        s_num = int(filters_dict["season"])
+        s_variations = [f"s{s_num:02d}", f"s{s_num}", f"season {s_num}", f"season {s_num:02d}"]
+    combinations = itertools.product(q_aliases, l_aliases, s_variations)
+    queries = []
+    for q, l, s in combinations:
+        tokens = [base_search]
+        if s: tokens.append(s)
+        if q: tokens.append(q)
+        if l: tokens.append(l)
+        queries.append(" ".join(tokens))
+    return queries
 
 def build_search_buttons(files, key, offset, total_results, req, settings, active_filter=None):
     """Improvement 4: Build uniform search results with active filter chips & informative labels."""
@@ -227,6 +321,8 @@ async def give_filter(client, message):
                     if await is_check_admin(client, message.chat.id, message.from_user.id):
                         return
                     return await message.delete()
+                if is_conversational_chat(message.text):
+                    return
                 await auto_filter(client, message)
         except KeyError:
             pass
@@ -595,26 +691,15 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
     req = query.from_user.id
     chat_id = query.message.chat.id
     message = query.message
-    try:
-        # Multi-user filter support
-        pass
-    except:
-        pass
 
-    if qual == "homepage":
-        query_input = search
-        active_chip = None
-        BUTTONS[key] = search
-    else:
-        aliases = QUALITY_ALIASES.get(qual.lower(), [qual])
-        query_input = [f"{search} {a}" for a in aliases]
-        active_chip = qual.upper()
-        BUTTONS[key] = f"{search} {qual}"
+    active_filters = set_active_filter(key, "quality", None if qual == "homepage" else qual.lower())
+    active_chip = get_filter_chip_label(active_filters)
+    query_input = build_combined_filter_queries(search, active_filters)
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
-        await query.answer("🚫 ɴᴏ ꜰɪʟᴇꜱ ᴡᴇʀᴇ ꜰᴏᴜɴᴅ 🚫", show_alert=1)
-        return
+        set_active_filter(key, "quality", None)
+        return await query.answer(f"🚫 No files found for {qual.upper()} with current filters 🚫", show_alert=True)
 
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
@@ -638,6 +723,7 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
         except MessageNotModified:
             pass
     await query.answer()
+
 # languages
 
 
@@ -683,26 +769,15 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
     req = query.from_user.id
     chat_id = query.message.chat.id
     message = query.message
-    try:
-        # Multi-user filter support
-        pass
-    except:
-        pass
 
-    if lang == "homepage":
-        query_input = search
-        active_chip = None
-        BUTTONS[key] = search
-    else:
-        aliases = LANGUAGE_ALIASES.get(lang.lower(), [lang])
-        query_input = [f"{search} {a}" for a in aliases]
-        active_chip = lang.title()
-        BUTTONS[key] = f"{search} {lang}"
+    active_filters = set_active_filter(key, "language", None if lang == "homepage" else lang.lower())
+    active_chip = get_filter_chip_label(active_filters)
+    query_input = build_combined_filter_queries(search, active_filters)
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
-        await query.answer("🚫 ɴᴏ ꜰɪʟᴇꜱ ᴡᴇʀᴇ ꜰᴏᴜɴᴅ 🚫", show_alert=1)
-        return
+        set_active_filter(key, "language", None)
+        return await query.answer(f"🚫 No files found in {lang.title()} with current filters 🚫", show_alert=True)
 
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
@@ -726,6 +801,7 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
         except MessageNotModified:
             pass
     await query.answer()
+
 
 @Client.on_callback_query(filters.regex(r"^seasons#"))
 async def seasons_cb_handler(client: Client, query: CallbackQuery):
@@ -767,31 +843,20 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
     req = query.from_user.id
     chat_id = query.message.chat.id
     message = query.message
-    try:
-        # Multi-user filter support
-        pass
-    except Exception:
-        pass
 
     if season_tag == "homepage":
-        query_input = search
-        active_chip = None
-        BUTTONS[key] = search
+        active_filters = set_active_filter(key, "season", None)
     else:
         season_number = int(season_tag[1:])
-        query_input = [
-            f"{search} s{season_number:02d}",
-            f"{search} s{season_number}",
-            f"{search} season {season_number}",
-            f"{search} season {season_number:02d}"
-        ]
-        active_chip = f"S{season_number:02d}"
-        BUTTONS[key] = f"{search} s{season_number:02d}"
+        active_filters = set_active_filter(key, "season", str(season_number))
+
+    active_chip = get_filter_chip_label(active_filters)
+    query_input = build_combined_filter_queries(search, active_filters)
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
-        BUTTONS[key] = search
-        return await query.answer(f"🚫 No files found for Season {season_number} 🚫", show_alert=True)
+        set_active_filter(key, "season", None)
+        return await query.answer(f"🚫 No files found for {season_tag.upper()} with current filters 🚫", show_alert=True)
 
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
@@ -801,7 +866,7 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
     if not settings.get("button"):
         cur_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
         time_difference = timedelta(hours=cur_time.hour, minutes=cur_time.minute, seconds=(cur_time.second+(cur_time.microsecond/1000000))) - \
-            timedelta(hours=cur_time.hour, minutes=cur_time.minute, seconds=(cur_time.second+(cur_time.microsecond/1000000)))
+            timedelta(hours=curr_time.hour, minutes=curr_time.minute, seconds=(curr_time.second+(curr_time.microsecond/1000000)))
         remaining_seconds = "{:.2f}".format(time_difference.total_seconds())
         dreamx_title = clean_search_text(search)
         cap = await get_cap(settings, remaining_seconds, files, query, total_results, dreamx_title, offset=1)
@@ -819,16 +884,12 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
 # Improvement 4: Handlers for Reset Filters and Filter Info Chips
 @Client.on_callback_query(filters.regex(r"^reset_filter#"))
 async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
-    try:
-        # Multi-user filter support
-        pass
-    except:
-        pass
     _, key = query.data.split("#")
     search = FRESH.get(key)
     if not search:
         return await query.answer("Search expired! Please search again.", show_alert=True)
     search = search.replace("_", " ")
+    clear_active_filters(key)
     BUTTONS[key] = search
     chat_id = query.message.chat.id
     req = query.from_user.id
@@ -856,51 +917,7 @@ async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^filter_info#"))
 async def filter_info_cb_handler(client: Client, query: CallbackQuery):
     tag = query.data.split("#")[1]
-    await query.answer(f"🎯 Active filter: {tag}", show_alert=True)
-
-
-@Client.on_callback_query()
-async def cb_handler(client: Client, query: CallbackQuery):
-    DreamxData = query.data
-    if DreamxData and (DreamxData.startswith(("buy_", "paywall_", "rzp_verify#")) or DreamxData == "myplan_cb"):
-        return
-    if query.data == "close_data":
-        try:
-            user = query.message.reply_to_message.from_user.id
-        except:
-            user = query.from_user.id
-        if int(user) != 0 and query.from_user.id != int(user):
-            return await query.answer(script.NT_ALRT_TXT, show_alert=True)
-        await query.answer("ᴛʜᴀɴᴋs ꜰᴏʀ ᴄʟᴏsᴇ 🙈")
-        await query.message.delete()
-        try:
-            await query.message.reply_to_message.delete()
-        except:
-            pass
-
-    elif query.data == "pages":
-        await query.answer("ᴛʜɪs ɪs ᴘᴀɢᴇs ʙᴜᴛᴛᴏɴ 😅")
-
-    elif query.data == "hiding":
-        await query.answer("ʙᴇᴄᴀᴜsᴇ ᴏғ ʟᴀɢᴛᴇ ғɪʟᴇs ɪɴ ᴅᴀᴛᴀʙᴀsᴇ,🙏\nɪᴛ ᴛᴀᴋᴇꜱ ʟɪᴛᴛʟᴇ ʙɪᴛ ᴛɪᴍᴇ",show_alert=True)
-
-    elif query.data == "delallcancel":
-        userid = query.from_user.id
-        chat_type = query.message.chat.type
-        if chat_type == enums.ChatType.PRIVATE:
-            await query.message.reply_to_message.delete()
-            await query.message.delete()
-        elif chat_type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-            grp_id = query.message.chat.id
-            st = await client.get_chat_member(grp_id, userid)
-            if (st.status == enums.ChatMemberStatus.OWNER) or (str(userid) in ADMINS):
-                await query.message.delete()
-                try:
-                    await query.message.reply_to_message.delete()
-                except:
-                    pass
-            else:
-                await query.answer("Tʜᴀᴛ's ɴᴏᴛ ғᴏʀ ʏᴏᴜ!!", show_alert=True)
+    await query.answer(f"🎯 Active filters: {tag}", show_alert=True)
 
     if query.data.startswith("file"):
         ident, file_id = query.data.split("#")
@@ -1794,15 +1811,9 @@ async def auto_filter(client, msg, spoll=False):
                 await sent_obj.delete()
             except Exception:
                 pass
-            try:
-                await orig_msg.delete()
-            except Exception:
-                pass
+            # Keep user/group member messages intact; only delete bot message
         except Exception:
-            # ignore scheduling errors
             pass
-
-    # initialize to avoid NameError if reply_sticker fails
     m = None
 
     try:
@@ -1811,6 +1822,8 @@ async def auto_filter(client, msg, spoll=False):
             if message.text.startswith("/"):
                 return
             if re.findall(r"((^\/|^,|^!|^\.|^[\U0001F600-\U000E007F]).*)", message.text):
+                return
+            if is_conversational_chat(message.text):
                 return
             if len(message.text) < 100:
                 message_text = message.text or ""
