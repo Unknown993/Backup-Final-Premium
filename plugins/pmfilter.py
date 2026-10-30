@@ -317,8 +317,8 @@ async def refercall(bot, query):
 async def next_page(bot, query):
     ident, req, key, offset = query.data.split("_")
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
-    if int(req) not in [query.from_user.id, 0]:
-        return await query.answer(script.ALRT_TXT.format(query.from_user.first_name), show_alert=True)
+    # Multi-user pagination
+    pass
     try:
         offset = int(offset)
     except:
@@ -554,40 +554,34 @@ async def advantage_spoll_choker(bot, query):
 # Qualities
 @Client.on_callback_query(filters.regex(r"^qualities#"))
 async def qualities_cb_handler(client: Client, query: CallbackQuery):
-    try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(
-                f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\n"
-                f"ᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...",
-                show_alert=True,
-            )
-    except:
-        pass
-
     _, key = query.data.split("#")
     search = FRESH.get(key)
-    search = search.replace(' ', '_')
-
+    if not search:
+        return await query.answer("⚠️ Search expired! Please search again.", show_alert=True)
+    search = search.replace(" ", "_")
     btn = []
+    btn.append([
+        InlineKeyboardButton("Qᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}"),
+        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
+        InlineKeyboardButton("Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}"),
+        InlineKeyboardButton("↭ Fɪʟᴇs ↭", callback_data=f"reset_filter#{key}")
+    ])
+    btn.append([InlineKeyboardButton(text="⇊ ꜱᴇʟᴇᴄᴛ ǫᴜᴀʟɪᴛʏ ⇊", callback_data="ident")])
     for i in range(0, len(QUALITIES), 2):
         q1 = QUALITIES[i]
-        row = [InlineKeyboardButton(
-            text=q1, callback_data=f"fq#{q1.lower()}#{key}")]
+        row = [InlineKeyboardButton(text=q1, callback_data=f"fq#{q1.lower()}#{key}")]
         if i + 1 < len(QUALITIES):
             q2 = QUALITIES[i + 1]
-            row.append(InlineKeyboardButton(
-                text=q2, callback_data=f"fq#{q2.lower()}#{key}"))
+            row.append(InlineKeyboardButton(text=q2, callback_data=f"fq#{q2.lower()}#{key}"))
         btn.append(row)
-
-    btn.insert(0, [
-        InlineKeyboardButton(text="⇊ ꜱᴇʟᴇᴄᴛ ǫᴜᴀʟɪᴛʏ ⇊", callback_data="ident")
-    ])
     btn.append([
-        InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭",
-                             callback_data=f"fq#homepage#{key}")
+        InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"reset_filter#{key}")
     ])
-
-    await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
+    try:
+        await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
+    except MessageNotModified:
+        pass
+    await query.answer()
 
 
 @Client.on_callback_query(filters.regex(r"^fq#"))
@@ -602,8 +596,8 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
     chat_id = query.message.chat.id
     message = query.message
     try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\nᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...", show_alert=True)
+        # Multi-user filter support
+        pass
     except:
         pass
 
@@ -649,39 +643,33 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
 
 @Client.on_callback_query(filters.regex(r"^languages#"))
 async def languages_cb_handler(client: Client, query: CallbackQuery):
-    try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(
-                f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\n"
-                f"ᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...",
-                show_alert=True,
-            )
-    except:
-        pass
-
     _, key = query.data.split("#")
     search = FRESH.get(key)
-    search = search.replace(' ', '_')
-
+    if not search:
+        return await query.answer("⚠️ Search expired! Please search again.", show_alert=True)
+    search = search.replace(" ", "_")
     items = list(LANGUAGES.items())
     btn = []
-
+    btn.append([
+        InlineKeyboardButton("Qᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}"),
+        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
+        InlineKeyboardButton("Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}"),
+        InlineKeyboardButton("↭ Fɪʟᴇs ↭", callback_data=f"reset_filter#{key}")
+    ])
+    btn.append([InlineKeyboardButton(text="⇊ ꜱᴇʟᴇᴄᴛ ʟᴀɴɢᴜᴀɢᴇ ⇊", callback_data="ident")])
     for i in range(0, len(items), 2):
         name1, code1 = items[i]
-        row = [InlineKeyboardButton(
-            text=name1, callback_data=f"fl#{code1}#{key}")]
+        row = [InlineKeyboardButton(text=name1, callback_data=f"fl#{code1}#{key}")]
         if i + 1 < len(items):
             name2, code2 = items[i + 1]
-            row.append(InlineKeyboardButton(
-                text=name2, callback_data=f"fl#{code2}#{key}"))
+            row.append(InlineKeyboardButton(text=name2, callback_data=f"fl#{code2}#{key}"))
         btn.append(row)
-
-    btn.insert(0, [InlineKeyboardButton(
-        text="⇊ ꜱᴇʟᴇᴄᴛ ʟᴀɴɢᴜᴀɢᴇ ⇊", callback_data="ident")])
-    btn.append([InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭",
-               callback_data=f"fl#homepage#{key}")])
-
-    await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
+    btn.append([InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"reset_filter#{key}")])
+    try:
+        await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
+    except MessageNotModified:
+        pass
+    await query.answer()
 
 
 @Client.on_callback_query(filters.regex(r"^fl#"))
@@ -696,8 +684,8 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
     chat_id = query.message.chat.id
     message = query.message
     try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\nᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...", show_alert=True)
+        # Multi-user filter support
+        pass
     except:
         pass
 
@@ -739,35 +727,32 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
             pass
     await query.answer()
 
+@Client.on_callback_query(filters.regex(r"^seasons#"))
 async def seasons_cb_handler(client: Client, query: CallbackQuery):
-    try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(
-                f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\nᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ…",
-                show_alert=True,
-            )
-    except Exception:
-        pass
     _, key = query.data.split("#")
-    search = FRESH.get(key).replace(" ", "_")
+    search = FRESH.get(key)
+    if not search:
+        return await query.answer("⚠️ Search expired! Please search again.", show_alert=True)
+    search = search.replace(" ", "_")
     req = query.from_user.id
-    offset = 0
-    btn: list[list[InlineKeyboardButton]] = []
+    btn = []
+    btn.append([
+        InlineKeyboardButton("Qᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}"),
+        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
+        InlineKeyboardButton("Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}"),
+        InlineKeyboardButton("↭ Fɪʟᴇs ↭", callback_data=f"reset_filter#{key}")
+    ])
+    btn.append([InlineKeyboardButton("⇊ ꜱᴇʟᴇᴄᴛ ꜱᴇᴀꜱᴏɴ ⇊", callback_data="ident")])
     for i in range(0, len(SEASONS) - 1, 2):
         btn.append([
-            InlineKeyboardButton(
-                f"Sᴇᴀꜱᴏɴ {SEASONS[i][1:]}", callback_data=f"fs#{SEASONS[i].lower()}#{key}"),
-            InlineKeyboardButton(
-                f"Sᴇᴀꜱᴏɴ {SEASONS[i+1][1:]}", callback_data=f"fs#{SEASONS[i+1].lower()}#{key}")
+            InlineKeyboardButton(f"Sᴇᴀꜱᴏɴ {SEASONS[i][1:]}", callback_data=f"fs#{SEASONS[i].lower()}#{key}"),
+            InlineKeyboardButton(f"Sᴇᴀꜱᴏɴ {SEASONS[i+1][1:]}", callback_data=f"fs#{SEASONS[i+1].lower()}#{key}")
         ])
-
-    btn.insert(
-        0,
-        [InlineKeyboardButton("⇊ ꜱᴇʟᴇᴄᴛ ꜱᴇᴀꜱᴏɴ ⇊", callback_data="ident")],
-    )
-    btn.append([InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ​↭",
-               callback_data=f"next_{req}_{key}_{offset}")])
-    await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
+    btn.append([InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"reset_filter#{key}")])
+    try:
+        await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
+    except MessageNotModified:
+        pass
     await query.answer()
 
 
@@ -783,8 +768,8 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
     chat_id = query.message.chat.id
     message = query.message
     try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer("⚠️ Not your request", show_alert=True)
+        # Multi-user filter support
+        pass
     except Exception:
         pass
 
@@ -805,8 +790,8 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
-        BUTTONS[key] = None
-        return await query.answer("🚫 ɴᴏ ꜰɪʟᴇꜱ ꜰᴏᴜɴᴅ 🚫", show_alert=True)
+        BUTTONS[key] = search
+        return await query.answer(f"🚫 No files found for Season {season_number} 🚫", show_alert=True)
 
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
@@ -835,8 +820,8 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^reset_filter#"))
 async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
     try:
-        if int(query.from_user.id) not in [query.message.reply_to_message.from_user.id, 0]:
-            return await query.answer(f"⚠️ ʜᴇʟʟᴏ {query.from_user.first_name},\nᴛʜɪꜱ ɪꜱ ɴᴏᴛ ʏᴏᴜʀ ᴍᴏᴠɪᴇ ʀᴇǫᴜᴇꜱᴛ,\nʀᴇǫᴜᴇꜱᴛ ʏᴏᴜʀ'ꜱ...", show_alert=True)
+        # Multi-user filter support
+        pass
     except:
         pass
     _, key = query.data.split("#")
@@ -920,8 +905,8 @@ async def cb_handler(client: Client, query: CallbackQuery):
     if query.data.startswith("file"):
         ident, file_id = query.data.split("#")
         user = query.message.reply_to_message.from_user.id if query.message.reply_to_message else query.from_user.id
-        if int(user) != 0 and query.from_user.id != int(user):
-            return await query.answer(script.ALRT_TXT.format(query.from_user.first_name), show_alert=True)
+        # Multi-user: allow any member to fetch the file to their PM
+        pass
         await query.answer(url=f"https://t.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file_id}")
 
     elif query.data.startswith("sendfiles"):

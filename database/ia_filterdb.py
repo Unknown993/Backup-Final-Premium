@@ -99,14 +99,16 @@ def get_fts_connection():
 
 
 def save_to_fts(file_id, file_ref, file_name, file_size, file_type, mime_type, caption):
-    """Index file into local SQLite FTS5 catalog."""
+    """Index file into local SQLite FTS5 catalog with clean normalization."""
     try:
+        clean_name = re.sub(r"[^\w\s]", " ", str(file_name))
+        clean_name = re.sub(r"[^\w\s]", " ", str(file_name))
         conn = get_fts_connection()
         with conn:
             conn.execute("""
                 INSERT OR REPLACE INTO media_catalog (file_id, file_ref, file_name, file_size, file_type, mime_type, caption)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (file_id, file_ref, file_name, file_size, file_type, mime_type, caption))
+            """, (file_id, file_ref, clean_name, file_size, file_type, mime_type, caption))
         return True
     except Exception as e:
         logger.error(f"FTS save error: {e}")
@@ -124,46 +126,52 @@ def _build_fts_query(query):
         phrases = [query] if query and query.strip() else []
 
     fts_or_parts = []
-    short_words = set()
-
     for phrase in phrases:
         cleaned = _sanitize_term(phrase)
         if not cleaned:
             continue
-        words = cleaned.split()
-        long_words = [w for w in words if len(w) >= 3]
-        for w in words:
-            if len(w) < 3:
-                short_words.add(w.lower())
 
-        if long_words:
-            part = ' AND '.join(f'"{w}"' for w in long_words)
+        season_match = re.search(r'\bseason\s*(\d{1,2})\b', cleaned, re.I)
+        if season_match:
+            s_num = int(season_match.group(1))
+            title_part = re.sub(r'\bseason\s*\d{1,2}\b', '', cleaned, flags=re.I).strip()
+            title_words = [w for w in title_part.split() if len(w) >= 3]
+            if title_words:
+                title_expr = ' AND '.join(f'"{w}"' for w in title_words)
+                fts_or_parts.append(f'({title_expr} AND "season {s_num}")')
+                fts_or_parts.append(f'({title_expr} AND "season {s_num:02d}")')
+                fts_or_parts.append(f'({title_expr} AND "s{s_num:02d}")')
+            continue
+
+        words = [w for w in cleaned.split() if len(w) >= 3]
+        if words:
+            part = ' AND '.join(f'"{w}"' for w in words)
             fts_or_parts.append(f'({part})')
 
-    fts_expression = ' OR '.join(fts_or_parts) if fts_or_parts else None
-    return fts_expression, list(short_words)
+    return ' OR '.join(fts_or_parts) if fts_or_parts else None
 
 
 def query_fts(query, file_type=None, max_results=10, offset=0):
     """Query SQLite FTS5 trigram virtual table in 1-3 ms."""
     try:
         conn = get_fts_connection()
-        # Fast check if SQLite catalog is populated
         total_catalog = conn.execute("SELECT count(*) FROM media_catalog").fetchone()[0]
         if total_catalog == 0:
             return None, "", 0  # Signal fallback to MongoDB
 
-        fts_expr, short_words = _build_fts_query(query)
+        fts_expr = _build_fts_query(query)
         where_parts = []
         params = []
 
         if fts_expr:
             where_parts.append("media_fts MATCH ?")
             params.append(fts_expr)
-
-        for sw in short_words:
-            where_parts.append("c.file_name LIKE ?")
-            params.append(f"%{sw}%")
+        else:
+            q_raw = query if isinstance(query, str) else (query[0] if query else "")
+            cleaned = _sanitize_term(q_raw)
+            if cleaned:
+                where_parts.append("c.file_name LIKE ?")
+                params.append(f"%{cleaned}%")
 
         if file_type:
             where_parts.append("c.file_type = ?")
@@ -258,10 +266,12 @@ async def sync_mongo_to_fts(batch_size=2000):
         batch = []
         count = 0
         async for doc in cursor:
+            c_fn = re.sub(r"[^\w\s]", " ", str(doc.file_name))
+            c_fn = re.sub(r"[^\w\s]", " ", str(doc.file_name))
             batch.append((
                 doc.file_id,
                 doc.file_ref,
-                doc.file_name,
+                c_fn,
                 doc.file_size,
                 getattr(doc, "file_type", "video"),
                 getattr(doc, "mime_type", None),
@@ -457,9 +467,17 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
     # Fallback Path: MongoDB regex search if SQLite FTS has 0 matches or empty catalog
     # This is the new "middle-ground" regex logic for speed and flexibility
     if isinstance(query, list):
-        # This part handles season searches etc., where you need to match any of the full phrases.
-        raw_pattern = '|'.join(re.escape(q.strip()) for q in query if q.strip())
-        regex_list = [re.compile(raw_pattern, re.IGNORECASE)] if raw_pattern else []
+        regex_list = []
+        for q in query:
+            q_clean = q.strip()
+            if not q_clean:
+                continue
+            words = [re.escape(w) for w in q_clean.split()]
+            pattern = r'.*'.join(words)
+            try:
+                regex_list.append(re.compile(pattern, re.IGNORECASE))
+            except re.error:
+                pass
         
         if USE_CAPTION_FILTER:
             filter_mongo = {"$or": ([{"file_name": r} for r in regex_list] + [{"caption": r} for r in regex_list])}
