@@ -26,7 +26,7 @@ logger.setLevel(logging.ERROR)
 
 
 TIMEZONE = "Asia/Kolkata"
-from database.ia_filterdb import cache_set_field, cache_get_field, cache_save_getall, cache_get_getall
+from database.ia_filterdb import cache_set_field, cache_get_field, cache_save_getall, cache_get_getall, drop_fts_catalog, delete_from_fts
 
 class PersistentDict(dict):
     """Thread-safe dictionary backed by SQLite for zero cache-loss across bot reboots."""
@@ -137,51 +137,14 @@ def is_conversational_chat(text: str) -> bool:
     return False
 
 def format_button_label(file_name: str, file_size: int, max_len: int = 58) -> str:
-    """Format file buttons strictly in order: Size, Quality, Language, Title."""
-    fn = str(file_name or "")
+    """Format file button: [{size}] {clean_title} cleanly without artificial badge bloat."""
+    fn = str(file_name or "").strip()
     size_str = get_size(file_size)
-    quality = ""
-    q_match = re.search(r"\b(2160p|4k|1080p|720p|480p|360p|hd|fhd|uhd)\b", fn, re.I)
-    if q_match:
-        val = q_match.group(1).upper()
-        quality = "4K" if val in ("4K", "2160P") else val
-    se_badge = ""
-    se_match = re.search(r"\b(S\d{1,2}(?:\s*E\d{1,2})?|Season\s*\d{1,2})\b", fn, re.I)
-    if se_match:
-        se_badge = se_match.group(1).replace(" ", "").upper()
-    audio = ""
-    if re.search(r"\b(dual(\s*audio)?)\b", fn, re.I):
-        audio = "Dual"
-    elif re.search(r"\b(multi(\s*audio)?)\b", fn, re.I):
-        audio = "Multi"
-    elif re.search(r"\b(hindi|hin)\b", fn, re.I):
-        audio = "Hin"
-    elif re.search(r"\b(english|eng)\b", fn, re.I):
-        audio = "Eng"
-    elif re.search(r"\b(tamil|tam)\b", fn, re.I):
-        audio = "Tam"
-    elif re.search(r"\b(telugu|tel)\b", fn, re.I):
-        audio = "Tel"
-    elif re.search(r"\b(malayalam|mal)\b", fn, re.I):
-        audio = "Mal"
-    elif re.search(r"\b(kannada|kan)\b", fn, re.I):
-        audio = "Kan"
-    badges = [size_str]
-    if quality:
-        badges.append(quality)
-    if se_badge:
-        badges.append(se_badge)
-    if audio:
-        badges.append(audio)
-    badge_str = f"[{chr(8226).join([chr(32) + b + chr(32) for b in badges]).strip()}]"
-    clean_title = re.sub(r"\.(mkv|mp4|avi|webm)$", "", fn, flags=re.I)
-    clean_title = re.sub(r"\[.*?\]|\(.*?\)", " ", clean_title)
-    clean_title = re.sub(r"[@_#\-\.]+", " ", clean_title)
-    clean_title = re.sub(r"\s+", " ", clean_title).strip()
-    avail_len = max_len - len(badge_str) - 2
-    if avail_len > 10 and len(clean_title) > avail_len:
-        clean_title = clean_title[:avail_len - 1] + "…"
-    return f"{badge_str} {clean_title}"
+    prefix = f"[{size_str}]"
+    avail = max_len - len(prefix) - 1
+    if avail > 5 and len(fn) > avail:
+        fn = fn[:avail - 1].rstrip() + "…"
+    return f"{prefix} {fn}".strip()
 
 import itertools
 ACTIVE_FILTERS = {}
@@ -415,8 +378,11 @@ async def next_page(bot, query):
         offset = 0
     active_filters = get_active_filters(key)
     active_chip = get_filter_chip_label(active_filters)
-    if active_filters:
-        search_input = {"search": FRESH.get(key, "").replace("_", " "), **active_filters}
+    raw_search = get_search_query_for_key(key, query)
+    if active_filters and raw_search:
+        search_input = {"search": raw_search, **active_filters}
+    elif raw_search:
+        search_input = raw_search
     elif BUTTONS.get(key) != None:
         search_input = BUTTONS.get(key)
     else:
@@ -670,14 +636,36 @@ async def edit_search_message(query: CallbackQuery, text_or_cap: str, reply_mark
         except Exception:
             pass
 
+def get_search_query_for_key(key: str, query: CallbackQuery = None) -> str:
+    """Retrieve search query from cache or recover directly from the message to persist across restarts."""
+    search = FRESH.get(key)
+    if search:
+        return str(search).replace("_", " ").strip()
+    search = BUTTONS.get(key)
+    if search:
+        return str(search).replace("_", " ").strip()
+    if query and query.message:
+        if query.message.reply_to_message and query.message.reply_to_message.text:
+            text = query.message.reply_to_message.text.strip()
+            if not text.startswith("/") and len(text) > 1:
+                FRESH[key] = text
+                return text
+        body = query.message.text or query.message.caption or ""
+        match = re.search(r"(?:🏷\s*)?(?:TITLE|ᴛɪᴛʟᴇ)\s*:\s*`?([^\n`]+)`?", body, re.IGNORECASE)
+        if match:
+            extracted = match.group(1).strip()
+            if extracted:
+                FRESH[key] = extracted
+                return extracted
+    return ""
+
 # Qualities
 @Client.on_callback_query(filters.regex(r"^qualities#"))
 async def qualities_cb_handler(client: Client, query: CallbackQuery):
     _, key = query.data.split("#")
-    search = FRESH.get(key)
+    search = get_search_query_for_key(key, query)
     if not search:
         return await query.answer("⚠️ Search expired! Please search again.", show_alert=True)
-    search = search.replace(" ", "_")
     btn = []
     btn.append([
         InlineKeyboardButton("Qᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}"),
@@ -707,10 +695,9 @@ async def qualities_cb_handler(client: Client, query: CallbackQuery):
 async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
     _, qual, key = query.data.split("#")
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
-    search = FRESH.get(key)
+    search = get_search_query_for_key(key, query)
     if not search:
         return await query.answer("⚠️ Search expired! Please search again.", show_alert=True)
-    search = search.replace("_", " ")
     req = query.from_user.id
     chat_id = query.message.chat.id
     message = query.message
@@ -751,10 +738,9 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^languages#"))
 async def languages_cb_handler(client: Client, query: CallbackQuery):
     _, key = query.data.split("#")
-    search = FRESH.get(key)
+    search = get_search_query_for_key(key, query)
     if not search:
         return await query.answer("⚠️ Search expired! Please search again.", show_alert=True)
-    search = search.replace(" ", "_")
     items = list(LANGUAGES.items())
     btn = []
     btn.append([
@@ -783,10 +769,9 @@ async def languages_cb_handler(client: Client, query: CallbackQuery):
 async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
     _, lang, key = query.data.split("#")
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
-    search = FRESH.get(key)
+    search = get_search_query_for_key(key, query)
     if not search:
         return await query.answer("⚠️ Search expired! Please search again.", show_alert=True)
-    search = search.replace("_", " ")
     req = query.from_user.id
     chat_id = query.message.chat.id
     message = query.message
@@ -825,10 +810,9 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^seasons#"))
 async def seasons_cb_handler(client: Client, query: CallbackQuery):
     _, key = query.data.split("#")
-    search = FRESH.get(key)
+    search = get_search_query_for_key(key, query)
     if not search:
         return await query.answer("⚠️ Search expired! Please search again.", show_alert=True)
-    search = search.replace(" ", "_")
     req = query.from_user.id
     btn = []
     btn.append([
@@ -855,10 +839,9 @@ async def seasons_cb_handler(client: Client, query: CallbackQuery):
 async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
     curr_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
     _, season_tag, key = query.data.split("#")
-    search = FRESH.get(key)
+    search = get_search_query_for_key(key, query)
     if not search:
         return await query.answer("⚠️ Search expired! Please search again.", show_alert=True)
-    search = search.replace("_", " ")
     season_tag = season_tag.lower()
     req = query.from_user.id
     chat_id = query.message.chat.id
@@ -903,12 +886,9 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^back_filter#"))
 async def back_filter_cb_handler(client: Client, query: CallbackQuery):
     _, key = query.data.split("#")
-    search = FRESH.get(key)
-    if not search:
-        search = BUTTONS.get(key)
+    search = get_search_query_for_key(key, query)
     if not search:
         return await query.answer("Search expired! Please search again.", show_alert=True)
-    search = search.replace("_", " ").strip()
     active_filters = get_active_filters(key)
     active_chip = get_filter_chip_label(active_filters)
     query_input = {"search": search, **active_filters} if active_filters else search
@@ -935,7 +915,7 @@ async def back_filter_cb_handler(client: Client, query: CallbackQuery):
 @Client.on_callback_query(filters.regex(r"^reset_filter#"))
 async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
     _, key = query.data.split("#")
-    search = FRESH.get(key)
+    search = get_search_query_for_key(key, query)
     if not search:
         return await query.answer("Search expired! Please search again.", show_alert=True)
     search = search.replace("_", " ")
@@ -988,6 +968,9 @@ async def cb_handler(client: Client, query: CallbackQuery):
 
     elif query.data == "pages":
         await query.answer("ᴛʜɪs ɪs ᴘᴀɢᴇs ʙᴜᴛᴛᴏɴ 😅")
+
+    elif query.data == "ident":
+        await query.answer()
 
     elif query.data == "hiding":
         await query.answer("ʙᴇᴄᴀᴜsᴇ ᴏғ ʟᴀɢᴛᴇ ғɪʟᴇs ɪɴ ᴅᴀᴛᴀʙᴀsᴇ,🙏\nɪᴛ ᴛᴀᴋᴇꜱ ʟɪᴛᴛʟᴇ ʙɪᴛ ᴛɪᴍᴇ", show_alert=True)
@@ -1066,9 +1049,13 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await query.answer(url=f"href='https://telegram.me/{temp.U_NAME}?start=file_{query.message.chat.id}_{file.file_id}")
 
     elif query.data.startswith("autofilter_delete"):
+        user_id = query.from_user.id if query.from_user else 0
+        if user_id not in ADMINS and str(user_id) not in [str(a) for a in ADMINS]:
+            return await query.answer("You are not authorized to perform this action!", show_alert=True)
         await Media.collection.drop()
         if MULTIPLE_DB:    
             await Media2.collection.drop()
+        drop_fts_catalog()
         await query.answer("Eᴠᴇʀʏᴛʜɪɴɢ's Gᴏɴᴇ")
         await query.message.edit('ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ ᴅᴇʟᴇᴛᴇᴅ ᴀʟʟ ɪɴᴅᴇxᴇᴅ ꜰɪʟᴇꜱ ✅')
 
@@ -1120,6 +1107,7 @@ async def cb_handler(client: Client, query: CallbackQuery):
                         result = await Media2.collection.delete_one({
                             '_id': file_ids,
                         })
+                    delete_from_fts(file_id=file_ids)
                     if result.deleted_count:
                         logger.info(
                             f'ꜰɪʟᴇ ꜰᴏᴜɴᴅ ꜰᴏʀ ʏᴏᴜʀ ǫᴜᴇʀʏ {keyword}! ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ ᴅᴇʟᴇᴛᴇᴅ {file_name} ꜰʀᴏᴍ ᴅᴀᴛᴀʙᴀꜱᴇ.')
@@ -2204,10 +2192,9 @@ async def advantage_spell_chok(client, message):
     except:
         k = await message.reply(script.I_CUDNT.format(message.from_user.mention))
         await asyncio.sleep(60)
-        await k.delete()
         try:
-            await message.delete()
-        except:
+            await k.delete()
+        except Exception:
             pass
         return
     if not movies:
@@ -2216,10 +2203,9 @@ async def advantage_spell_chok(client, message):
             "🔍 ᴄʜᴇᴄᴋ sᴘᴇʟʟɪɴɢ ᴏɴ ɢᴏᴏɢʟᴇ 🔍", url=f"https://www.google.com/search?q={google}")]]
         k = await message.reply_text(text=script.I_CUDNT.format(search), reply_markup=InlineKeyboardMarkup(button))
         await asyncio.sleep(60)
-        await k.delete()
         try:
-            await message.delete()
-        except:
+            await k.delete()
+        except Exception:
             pass
         return
     user = message.from_user.id if message.from_user else 0
@@ -2231,8 +2217,7 @@ async def advantage_spell_chok(client, message):
         text="🚫 ᴄʟᴏsᴇ 🚫", callback_data='close_data')])
     d = await message.reply_text(text=script.CUDNT_FND.format(message.from_user.mention), reply_markup=InlineKeyboardMarkup(buttons), reply_to_message_id=message.id)
     await asyncio.sleep(60)
-    await d.delete()
     try:
-        await message.delete()
-    except:
+        await d.delete()
+    except Exception:
         pass

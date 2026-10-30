@@ -122,9 +122,8 @@ async def dreamxbotz_start():
     else:
         print("Single DB Mode On! Files will be saved in the first DB.")
 
-    # Background sync MongoDB to SQLite FTS5 Trigram
-    from database.ia_filterdb import sync_mongo_to_fts
-    asyncio.create_task(sync_mongo_to_fts())
+    # SQLite FTS indexes files incrementally on save; full sync available via admin command /syncfts
+    # This prevents blocking the asyncio event loop and 20-30s lag on Heroku restarts.
 
     # Store bot information.
     me = await dreamxbotz.get_me()

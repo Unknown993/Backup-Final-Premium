@@ -24,15 +24,20 @@ routes = web.RouteTableDef()
 async def razorpay_webhook_handler(request: web.Request):
     try:
         raw_body = await request.read()
-        if RAZORPAY_WEBHOOK_SECRET:
-            signature = request.headers.get("X-Razorpay-Signature", "")
-            expected_sig = hmac.new(
-                RAZORPAY_WEBHOOK_SECRET.encode("utf-8"),
-                raw_body,
-                hashlib.sha256,
-            ).hexdigest()
-            if not hmac.compare_digest(signature, expected_sig):
-                return web.json_response({"ok": False, "error": "Invalid signature"}, status=400)
+        if not RAZORPAY_WEBHOOK_SECRET:
+            return web.json_response({"ok": False, "error": "Webhook endpoint is disabled (secret unconfigured)"}, status=403)
+
+        signature = request.headers.get("X-Razorpay-Signature", "")
+        if not signature:
+            return web.json_response({"ok": False, "error": "Missing signature header"}, status=400)
+
+        expected_sig = hmac.new(
+            RAZORPAY_WEBHOOK_SECRET.encode("utf-8"),
+            raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_sig):
+            return web.json_response({"ok": False, "error": "Invalid signature"}, status=400)
 
         payload = json.loads(raw_body.decode("utf-8"))
         event = payload.get("event", "")

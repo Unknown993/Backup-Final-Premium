@@ -132,8 +132,9 @@ async def users_broadcast(user_id, message, is_pin):
             await m.pin(both_sides=True)
         return True, "Success"
     except FloodWait as e:
-        await asyncio.sleep(e.x)
-        return await users_broadcast(user_id, message)
+        wait_time = getattr(e, "value", getattr(e, "x", 5))
+        await asyncio.sleep(wait_time)
+        return await users_broadcast(user_id, message, is_pin)
     except InputUserDeactivated:
         await db.delete_user(int(user_id))
         logging.info(f"{user_id}-Removed from Database, since deleted account.")
@@ -159,8 +160,9 @@ async def groups_broadcast(chat_id, message, is_pin):
                 pass
         return "Success"
     except FloodWait as e:
-        await asyncio.sleep(e.x)
-        return await groups_broadcast(chat_id, message)
+        wait_time = getattr(e, "value", getattr(e, "x", 5))
+        await asyncio.sleep(wait_time)
+        return await groups_broadcast(chat_id, message, is_pin)
     except Exception as e:
         await db.delete_chat(chat_id)
         return "Error"
@@ -450,63 +452,13 @@ LANGUAGE_ALIASES = {
     "urdu": ["urdu"]
 }
 
-def format_clean_file_item(file, max_len: int = 58) -> str:
-    """Format file with clean UI in strict order: Size, Quality, Language, Title."""
+def format_clean_file_item(file, max_len: int = 0) -> str:
+    """Return clean file title directly as it is without artificial formatting."""
     raw_name = get_display_name(file)
-    file_size = getattr(file, "file_size", 0)
-    size_str = get_size(file_size)
-    fn = str(raw_name or "").strip()
-
-    # 1. Quality badge
-    quality = ""
-    q_match = re.search(r"\b(2160p|4k|1080p|720p|480p|360p|hd|fhd|uhd)\b", fn, re.I)
-    if q_match:
-        val = q_match.group(1).upper()
-        quality = "4K" if val in ("4K", "2160P") else val
-
-    # 2. Language / Audio badge
-    audio = ""
-    if re.search(r"\b(dual(\s*audio)?)\b", fn, re.I):
-        audio = "Dual"
-    elif re.search(r"\b(multi(\s*audio)?)\b", fn, re.I):
-        audio = "Multi"
-    elif re.search(r"\b(hindi|hin)\b", fn, re.I):
-        audio = "Hin"
-    elif re.search(r"\b(english|eng)\b", fn, re.I):
-        audio = "Eng"
-    elif re.search(r"\b(tamil|tam)\b", fn, re.I):
-        audio = "Tam"
-    elif re.search(r"\b(telugu|tel)\b", fn, re.I):
-        audio = "Tel"
-    elif re.search(r"\b(malayalam|mal)\b", fn, re.I):
-        audio = "Mal"
-    elif re.search(r"\b(kannada|kan)\b", fn, re.I):
-        audio = "Kan"
-
-    badges = [size_str]
-    if quality:
-        badges.append(quality)
-    if audio:
-        badges.append(audio)
-    badge_str = f"[{' • '.join(badges)}]"
-
-    # Clean the title: remove urls, channel tags, extensions, symbols
-    clean_title = re.sub(r"https?://\S+|www\.\S+|t\.me/\S+", "", fn, flags=re.I)
-    clean_title = re.sub(r"@\w+", "", clean_title)
-    clean_title = re.sub(r"\b(mkv|mp4|avi|webm)\b", "", clean_title, flags=re.I)
-    clean_title = re.sub(r"\[.*?\]|\(.*?\)", " ", clean_title)
-    clean_title = re.sub(r"[\W_]+", " ", clean_title)
-    words = [w for w in clean_title.split() if w.lower() not in _UNWANTED_BAD_WORDS]
-    clean_title = " ".join(words).strip()
-    if not clean_title:
-        clean_title = fn
-
-    if max_len:
-        avail_len = max_len - len(badge_str) - 2
-        if avail_len > 10 and len(clean_title) > avail_len:
-            clean_title = clean_title[:avail_len - 1].rstrip() + "…"
-
-    return f"{badge_str} {clean_title}".strip()
+    clean_title = str(raw_name or "").strip()
+    if max_len and len(clean_title) > max_len:
+        clean_title = clean_title[:max_len - 1].rstrip() + "…"
+    return clean_title
 
 def get_display_name(file) -> str:
     """Return raw file title as stored in DB without cleaning, falling back to caption if file_name is None/empty."""

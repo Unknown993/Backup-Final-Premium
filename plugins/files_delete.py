@@ -2,7 +2,7 @@ import re
 import logging
 from pyrogram import Client, filters
 from info import DELETE_CHANNELS
-from database.ia_filterdb import Media, Media2, unpack_new_file_id
+from database.ia_filterdb import Media, Media2, unpack_new_file_id, delete_from_fts
 logger = logging.getLogger(__name__)
 
 media_filter = filters.document | filters.video | filters.audio
@@ -29,6 +29,7 @@ async def deletemultiplemedia(bot, message):
             '_id': file_id,
         })
     if result.deleted_count:
+        delete_from_fts(file_id=file_id)
         logger.info('File is successfully deleted from database.')
     else:
         file_name = re.sub(r"(_|\-|\.|\+)", " ", str(media.file_name))
@@ -38,6 +39,7 @@ async def deletemultiplemedia(bot, message):
             'mime_type': media.mime_type
             })
         if result.deleted_count:
+            delete_from_fts(file_name=file_name, file_size=media.file_size)
             logger.info('File is successfully deleted from database.')
         else:
             result = await Media2.collection.delete_many({
@@ -46,6 +48,7 @@ async def deletemultiplemedia(bot, message):
                 'mime_type': media.mime_type
                 })
             if result.deleted_count:
+                delete_from_fts(file_name=file_name, file_size=media.file_size)
                 logger.info('File is successfully deleted from database.')
             else:
                 result = await Media.collection.delete_many({
@@ -54,6 +57,7 @@ async def deletemultiplemedia(bot, message):
                     'mime_type': media.mime_type
                 })
                 if result.deleted_count:
+                    delete_from_fts(file_name=media.file_name, file_size=media.file_size)
                     logger.info('File is successfully deleted from database.')
                 else:
                     result = await Media2.collection.delete_many({
@@ -62,6 +66,7 @@ async def deletemultiplemedia(bot, message):
                         'mime_type': media.mime_type
                     })
                     if result.deleted_count:
+                        delete_from_fts(file_name=media.file_name, file_size=media.file_size)
                         logger.info('File is successfully deleted from database.')
                     else:
                         logger.info('File not found in database.')

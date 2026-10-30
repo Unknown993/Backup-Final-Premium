@@ -116,6 +116,34 @@ def save_to_fts(file_id, file_ref, file_name, file_size, file_type, mime_type, c
         return False
 
 
+def delete_from_fts(file_id=None, file_name=None, file_size=None):
+    """Remove matching file(s) from SQLite catalog and FTS index."""
+    try:
+        conn = get_fts_connection()
+        with conn:
+            if file_id:
+                conn.execute("DELETE FROM media_catalog WHERE file_id = ?", (file_id,))
+            elif file_name and file_size:
+                clean_name = re.sub(r"[^\w\s]", " ", str(file_name))
+                conn.execute(
+                    "DELETE FROM media_catalog WHERE (file_name = ? OR file_name = ?) AND file_size = ?",
+                    (clean_name, str(file_name), file_size)
+                )
+    except Exception as e:
+        logger.error(f"FTS delete error: {e}")
+
+
+def drop_fts_catalog():
+    """Drop SQLite catalog and FTS index."""
+    try:
+        conn = get_fts_connection()
+        with conn:
+            conn.execute("DELETE FROM media_catalog")
+            conn.execute("DELETE FROM filter_cache")
+    except Exception as e:
+        logger.error(f"FTS drop error: {e}")
+
+
 def _sanitize_term(term: str) -> str:
     return re.sub(r'[^\w\s]', ' ', term).strip()
 
@@ -177,10 +205,12 @@ def build_mongo_filter(query, file_type=None):
     """Construct MongoDB query condition cleanly supporting multi-filter dicts, lists, and strings."""
     if isinstance(query, dict):
         base_search = query.get("search", "").strip()
-        base_words = [re.escape(w) for w in base_search.split() if w]
+        base_words = [w for w in base_search.split() if w]
         and_conditions = []
         if base_words:
-            base_regex = re.compile(r".*".join(base_words), re.IGNORECASE)
+            # Word boundaries preserve numbers and short tokens (e.g. Iron Man 2 vs Iron Woman)
+            pattern = r".*".join(rf"\b{re.escape(w)}\b" if re.match(r'^\w+$', w) else re.escape(w) for w in base_words)
+            base_regex = re.compile(pattern, re.IGNORECASE)
             if USE_CAPTION_FILTER:
                 and_conditions.append({"$or": [{"file_name": base_regex}, {"caption": base_regex}]})
             else:
@@ -216,8 +246,8 @@ def build_mongo_filter(query, file_type=None):
             q_clean = q.strip()
             if not q_clean:
                 continue
-            words = [re.escape(w) for w in q_clean.split()]
-            pattern = r'.*'.join(words)
+            words = [w for w in q_clean.split()]
+            pattern = r'.*'.join(rf"\b{re.escape(w)}\b" if re.match(r'^\w+$', w) else re.escape(w) for w in words)
             try:
                 regex_list.append(re.compile(pattern, re.IGNORECASE))
             except re.error:
@@ -234,10 +264,10 @@ def build_mongo_filter(query, file_type=None):
         if not q_str:
             return {}
         if ' ' in q_str:
-            words = [re.escape(word) for word in q_str.split()]
-            raw_pattern = r'.*'.join(words)
+            words = [word for word in q_str.split()]
+            raw_pattern = r'.*'.join(rf"\b{re.escape(w)}\b" if re.match(r'^\w+$', w) else re.escape(w) for w in words)
         else:
-            raw_pattern = re.escape(q_str)
+            raw_pattern = rf"\b{re.escape(q_str)}\b" if re.match(r'^\w+$', q_str) else re.escape(q_str)
         try:
             regex = re.compile(raw_pattern, flags=re.IGNORECASE)
             if USE_CAPTION_FILTER:
@@ -302,6 +332,17 @@ def query_fts(query, file_type=None, max_results=10, offset=0):
             )
             for r in rows
         ]
+
+        # Verify short terms/numbers (e.g. "2" in "Iron Man 2") are strictly matched
+        q_raw = query.get("search", "") if isinstance(query, dict) else (query[0] if isinstance(query, list) else str(query or ""))
+        short_tokens = [w for w in _sanitize_term(q_raw).split() if len(w) < 3 and w]
+        if short_tokens:
+            files = [
+                f for f in files
+                if all(re.search(rf"\b{re.escape(st)}\b", f.file_name, re.IGNORECASE) for st in short_tokens)
+            ]
+            if not files:
+                return None, "", 0  # Fallback to MongoDB regex to preserve short terms cleanly
 
         has_next = (offset + len(files)) < total
         next_offset = str(offset + len(files)) if has_next else ""
@@ -572,46 +613,57 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
     # The rest of the function remains the same, using parallel queries.
     if ULTRA_FAST_MODE:
         limit = max_results + 1
-        find_tasks = [Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)]
-        if MULTIPLE_DB:
-            find_tasks.append(Media2.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit))
-        
-        results = await asyncio.gather(*find_tasks)
-        files = results[0]
-        if MULTIPLE_DB and len(results) > 1:
-            files.extend(results[1])
-        
-        files = files[:limit]
+        if not MULTIPLE_DB:
+            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)
+        else:
+            count1 = await Media.count_documents(filter_mongo)
+            files = []
+            if offset < count1:
+                take1 = min(limit, count1 - offset)
+                files1 = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(take1).to_list(length=take1)
+                files.extend(files1)
+                if len(files) < limit:
+                    needed = limit - len(files)
+                    files2 = await Media2.find(filter_mongo).sort("$natural", -1).skip(0).limit(needed).to_list(length=needed)
+                    files.extend(files2)
+            else:
+                offset2 = offset - count1
+                files = await Media2.find(filter_mongo).sort("$natural", -1).skip(offset2).limit(limit).to_list(length=limit)
 
         has_next_page = len(files) > max_results
         if has_next_page:
-            files = files[:-1]
+            files = files[:max_results]
 
         next_offset = offset + len(files) if has_next_page else ""
         total_results = offset + len(files) + (1 if has_next_page else 0)
     else:
-        count_tasks = [Media.count_documents(filter_mongo)]
-        find_tasks = [Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results)]
+        if not MULTIPLE_DB:
+            count_task = Media.count_documents(filter_mongo)
+            find_task = Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results)
+            total_results, files = await asyncio.gather(count_task, find_task)
+            next_offset = offset + len(files)
+            if next_offset >= total_results:
+                next_offset = ""
+        else:
+            count1 = await Media.count_documents(filter_mongo)
+            count2 = await Media2.count_documents(filter_mongo)
+            total_results = count1 + count2
+            files = []
+            if offset < count1:
+                take1 = min(max_results, count1 - offset)
+                files1 = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(take1).to_list(length=take1)
+                files.extend(files1)
+                if len(files) < max_results:
+                    needed = max_results - len(files)
+                    files2 = await Media2.find(filter_mongo).sort("$natural", -1).skip(0).limit(needed).to_list(length=needed)
+                    files.extend(files2)
+            else:
+                offset2 = offset - count1
+                files = await Media2.find(filter_mongo).sort("$natural", -1).skip(offset2).limit(max_results).to_list(length=max_results)
 
-        if MULTIPLE_DB:
-            count_tasks.append(Media2.count_documents(filter_mongo))
-            find_tasks.append(Media2.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results))
-        
-        count_results, find_results = await asyncio.gather(
-            asyncio.gather(*count_tasks),
-            asyncio.gather(*find_tasks)
-        )
-        
-        total_results = sum(count_results)
-        files = find_results[0]
-        if MULTIPLE_DB and len(find_results) > 1:
-            files.extend(find_results[1])
-        
-        files = files[:max_results]
-        
-        next_offset = offset + len(files)
-        if next_offset >= total_results:
-            next_offset = ""
+            next_offset = offset + len(files)
+            if next_offset >= total_results:
+                next_offset = ""
 
     return files, next_offset, total_results
 

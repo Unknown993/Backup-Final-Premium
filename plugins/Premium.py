@@ -215,23 +215,27 @@ async def fulfill_razorpay_payment(
     if unique_key in _PROCESSED_PAYMENTS:
         return False
 
-    # Check persistent DB record for idempotency
+    # Check persistent DB record for idempotency (allow retries if status is pending/failed)
     existing = await db.codes.find_one({"_id": f"rzp_{unique_key}"})
-    if existing:
+    if existing and existing.get("status") == "completed":
         _PROCESSED_PAYMENTS.add(unique_key)
         return False
 
-    _PROCESSED_PAYMENTS.add(unique_key)
+    # Mark as durable pending before attempting subscription update
     try:
-        await db.codes.insert_one({
-            "_id": f"rzp_{unique_key}",
-            "user_id": user_id,
-            "amount_inr": amount_inr,
-            "payment_id": payment_id,
-            "created_at": datetime.datetime.now(),
-        })
-    except Exception:
-        pass
+        await db.codes.update_one(
+            {"_id": f"rzp_{unique_key}"},
+            {"$set": {
+                "user_id": user_id,
+                "amount_inr": amount_inr,
+                "payment_id": payment_id,
+                "status": "pending",
+                "updated_at": datetime.datetime.now(),
+            }},
+            upsert=True
+        )
+    except Exception as e:
+        logger.error(f"Error recording pending payment {unique_key}: {e}")
 
     if amount_inr in RAZORPAY_PLANS:
         raw_time = RAZORPAY_PLANS[amount_inr]
@@ -245,12 +249,40 @@ async def fulfill_razorpay_payment(
     if seconds <= 0:
         return False
 
-    data = await db.add_or_extend_premium(
-        user_id=user_id,
-        seconds=seconds,
-        amount_paid=amount_inr,
-        plan_name=plan_label,
-    )
+    try:
+        data = await db.add_or_extend_premium(
+            user_id=user_id,
+            seconds=seconds,
+            amount_paid=amount_inr,
+            plan_name=plan_label,
+        )
+    except Exception as e:
+        logger.error(f"Database error during premium activation for {user_id}: {e}")
+        # Keep status as pending/failed to permit retries
+        try:
+            await db.codes.update_one(
+                {"_id": f"rzp_{unique_key}"},
+                {"$set": {"status": "failed", "error": str(e), "failed_at": datetime.datetime.now()}}
+            )
+        except Exception:
+            pass
+        return False
+
+    if not data:
+        return False
+
+    # Mark as completed only after successful activation
+    try:
+        await db.codes.update_one(
+            {"_id": f"rzp_{unique_key}"},
+            {"$set": {
+                "status": "completed",
+                "completed_at": datetime.datetime.now(),
+            }}
+        )
+    except Exception:
+        pass
+    _PROCESSED_PAYMENTS.add(unique_key)
     expiry = data.get("expiry_time")
     expiry_str_in_ist, time_left_str, _ = get_ist_expiry_and_remaining(expiry)
 
