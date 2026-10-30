@@ -414,11 +414,61 @@ async def save_group_settings(group_id, key, value):
 _CLEAN_FILENAME_PREFIXES = ('[', '@', 'www.')
 _UNWANTED_BAD_WORDS = frozenset(word.lower() for word in BAD_WORDS)
 
+# Smart Aliases for Quality & Language
+QUALITY_ALIASES = {
+    "1080p": ["1080p", "1080", "fhd", "full hd"],
+    "720p": ["720p", "720", "hd"],
+    "480p": ["480p", "480", "sd"],
+    "2160p": ["2160p", "2160", "4k", "uhd"],
+    "4k": ["4k", "2160p", "2160", "uhd"],
+    "360p": ["360p", "360"],
+    "1440p": ["1440p", "1440", "2k"]
+}
+
+LANGUAGE_ALIASES = {
+    "hin": ["hindi", "hin", "dual", "multi"],
+    "hindi": ["hindi", "hin", "dual", "multi"],
+    "eng": ["english", "eng", "dual", "multi"],
+    "english": ["english", "eng", "dual", "multi"],
+    "tam": ["tamil", "tam", "dual", "multi"],
+    "tamil": ["tamil", "tam", "dual", "multi"],
+    "tel": ["telugu", "tel", "dual", "multi"],
+    "telugu": ["telugu", "tel", "dual", "multi"],
+    "mal": ["malayalam", "mal", "dual", "multi"],
+    "malayalam": ["malayalam", "mal", "dual", "multi"],
+    "kan": ["kannada", "kan", "dual", "multi"],
+    "kannada": ["kannada", "kan", "dual", "multi"],
+    "ben": ["bengali", "ben"],
+    "bengali": ["bengali", "ben"],
+    "mar": ["marathi", "mar"],
+    "marathi": ["marathi", "mar"],
+    "guj": ["gujarati", "guj"],
+    "gujarati": ["gujarati", "guj"],
+    "punj": ["punjabi", "punj", "pb"],
+    "punjabi": ["punjabi", "punj", "pb"],
+    "urdu": ["urdu"]
+}
+
+def get_display_name(file) -> str:
+    """Return raw file title as stored in DB without cleaning, falling back to caption if file_name is None/empty."""
+    if not file:
+        return "File"
+    fn = getattr(file, "file_name", None)
+    if fn and str(fn).strip() and str(fn).strip().lower() not in ("none", "null"):
+        return str(fn).strip()
+    cap = getattr(file, "caption", None)
+    if cap and str(cap).strip() and str(cap).strip().lower() not in ("none", "null"):
+        clean_cap = re.sub(r"<[^>]+>", "", str(cap)).strip()
+        if clean_cap:
+            return clean_cap
+    return str(fn or "File")
+
 def clean_filename(file_name):
-    return ' '.join(
-        word for word in file_name.split()
-        if not (word.startswith(_CLEAN_FILENAME_PREFIXES) or word.lower() in _UNWANTED_BAD_WORDS)
-    )
+    """Provide title as it is without cleaning (per user instructions), avoiding None output."""
+    if not file_name or str(file_name).strip().lower() in ("none", "null"):
+        return ""
+    return str(file_name).strip()
+
 
 def get_size(size):
     units = ["Bytes", "KB", "MB", "GB", "TB", "PB", "EB"]
@@ -835,7 +885,7 @@ async def get_cap(settings, remaining_seconds, files, query, total_results, sear
                             f"<a href='https://telegram.me/{temp.U_NAME}"
                             f"?start=file_{query.message.chat.id}_{file.file_id}'>"
                             f"[{get_size(file.file_size)}] "
-                            f"{clean_filename(file.file_name)}\n\n"
+                            f"{get_display_name(file)}\n\n"
                             f"</a></b>"
                         )
             else:
@@ -883,7 +933,7 @@ async def get_cap(settings, remaining_seconds, files, query, total_results, sear
                             f"<a href='https://telegram.me/{temp.U_NAME}"
                             f"?start=file_{query.message.chat.id}_{file.file_id}'>"
                             f"[{get_size(file.file_size)}] "
-                            f"{clean_filename(file.file_name)}\n\n"
+                            f"{get_display_name(file)}\n\n"
                             f"</a></b>"
                         )
                 else:
@@ -909,7 +959,7 @@ async def get_cap(settings, remaining_seconds, files, query, total_results, sear
                             f"<a href='https://telegram.me/{temp.U_NAME}"
                             f"?start=file_{query.message.chat.id}_{file.file_id}'>"
                             f"[{get_size(file.file_size)}] "
-                            f"{clean_filename(file.file_name)}\n\n"
+                            f"{get_display_name(file)}\n\n"
                             f"</a></b>"
                         )
 
@@ -930,13 +980,13 @@ async def get_cap(settings, remaining_seconds, files, query, total_results, sear
                 )
 
             cap += "\n\n<u>Your Requested Files Are Here</u>\n\n</b>"
-            for idx, file in enumerate(files, start=offset):
+            for idx, file in enumerate(files, start=offset + 1):
                         cap += (
                             f"<b>{idx}. "
                             f"<a href='https://telegram.me/{temp.U_NAME}"
                             f"?start=file_{query.message.chat.id}_{file.file_id}'>"
                             f"[{get_size(file.file_size)}] "
-                            f"{clean_filename(file.file_name)}\n\n"
+                            f"{get_display_name(file)}\n\n"
                             f"</a></b>"
                         )
         return cap
