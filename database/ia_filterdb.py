@@ -120,7 +120,63 @@ def _sanitize_term(term: str) -> str:
 
 
 def _build_fts_query(query):
-    if isinstance(query, list):
+    if isinstance(query, dict):
+        # Stacked structured query: {"search": "Loki", "season": 1, "quality": "1080p", "language": "hindi"}
+        base_search = query.get("search", "")
+        cleaned = _sanitize_term(base_search)
+        base_words = [w for w in cleaned.split() if len(w) >= 3]
+        and_blocks = []
+        if base_words:
+            base_expr = " AND ".join(f'"{w}"' for w in base_words)
+            and_blocks.append(f"({base_expr})")
+        if "season" in query and query["season"]:
+            s_num = int(query["season"])
+            s_parts = [f'"s{s_num:02d}"', f'"s{s_num}"', f'"season {s_num}"', f'"season {s_num:02d}"']
+            and_blocks.append(f"({" OR ".join(s_parts)})")
+        if "quality" in query and query["quality"]:
+            q_val = str(query["quality"]).lower()
+            from plugins.pmfilter import QUALITY_ALIASES
+            q_aliases = QUALITY_ALIASES.get(q_val, [q_val])
+            q_parts = [f'"{a}"' for a in q_aliases]
+            and_blocks.append(f"({" OR ".join(q_parts)})")
+        if "language" in query and query["language"]:
+            l_val = str(query["language"]).lower()
+            from plugins.pmfilter import LANGUAGE_ALIASES
+            l_aliases = LANGUAGE_ALIASES.get(l_val, [l_val])
+            l_parts = [f'"{a}"' for a in l_aliases]
+            and_blocks.append(f"({" OR ".join(l_parts)})")
+        return " AND ".join(and_blocks) if and_blocks else None
+
+    if isinstance(query, dict):
+        # Multi-filter structured query fallback for MongoDB
+        base_search = query.get("search", "").strip()
+        base_words = [re.escape(w) for w in base_search.split() if w]
+        and_conditions = []
+        if base_words:
+            base_regex = re.compile(r".*".join(base_words), re.IGNORECASE)
+            if USE_CAPTION_FILTER:
+                and_conditions.append({"$or": [{"file_name": base_regex}, {"caption": base_regex}]})
+            else:
+                and_conditions.append({"file_name": base_regex})
+        if "season" in query and query["season"]:
+            s_num = int(query["season"])
+            s_pats = [re.escape(f"s{s_num:02d}"), re.escape(f"s{s_num}"), re.escape(f"season {s_num}"), re.escape(f"season {s_num:02d}"), re.escape(f"season{s_num}")]
+            s_regex = re.compile(r"(" + "|".join(s_pats) + r")", re.IGNORECASE)
+            and_conditions.append({"file_name": s_regex})
+        if "quality" in query and query["quality"]:
+            q_val = str(query["quality"]).lower()
+            from plugins.pmfilter import QUALITY_ALIASES
+            q_aliases = QUALITY_ALIASES.get(q_val, [q_val])
+            q_regex = re.compile(r"(" + "|".join(re.escape(a) for a in q_aliases) + r")", re.IGNORECASE)
+            and_conditions.append({"file_name": q_regex})
+        if "language" in query and query["language"]:
+            l_val = str(query["language"]).lower()
+            from plugins.pmfilter import LANGUAGE_ALIASES
+            l_aliases = LANGUAGE_ALIASES.get(l_val, [l_val])
+            l_regex = re.compile(r"(" + "|".join(re.escape(a) for a in l_aliases) + r")", re.IGNORECASE)
+            and_conditions.append({"file_name": l_regex})
+        filter_mongo = {"$and": and_conditions} if and_conditions else {}
+    elif isinstance(query, list):
         phrases = [q for q in query if q and q.strip()]
     else:
         phrases = [query] if query and query.strip() else []
@@ -130,26 +186,22 @@ def _build_fts_query(query):
         cleaned = _sanitize_term(phrase)
         if not cleaned:
             continue
-
-        season_match = re.search(r'\bseason\s*(\d{1,2})\b', cleaned, re.I)
+        season_match = re.search(r"\bseason\s*(\d{1,2})\b", cleaned, re.I)
         if season_match:
             s_num = int(season_match.group(1))
-            title_part = re.sub(r'\bseason\s*\d{1,2}\b', '', cleaned, flags=re.I).strip()
+            title_part = re.sub(r"\bseason\s*\d{1,2}\b", "", cleaned, flags=re.I).strip()
             title_words = [w for w in title_part.split() if len(w) >= 3]
             if title_words:
-                title_expr = ' AND '.join(f'"{w}"' for w in title_words)
+                title_expr = " AND ".join(f'"{w}"' for w in title_words)
                 fts_or_parts.append(f'({title_expr} AND "season {s_num}")')
                 fts_or_parts.append(f'({title_expr} AND "season {s_num:02d}")')
                 fts_or_parts.append(f'({title_expr} AND "s{s_num:02d}")')
             continue
-
         words = [w for w in cleaned.split() if len(w) >= 3]
         if words:
-            part = ' AND '.join(f'"{w}"' for w in words)
-            fts_or_parts.append(f'({part})')
-
-    return ' OR '.join(fts_or_parts) if fts_or_parts else None
-
+            part = " AND ".join(f'"{w}"' for w in words)
+            fts_or_parts.append(f"({part})")
+    return " OR ".join(fts_or_parts) if fts_or_parts else None
 
 def query_fts(query, file_type=None, max_results=10, offset=0):
     """Query SQLite FTS5 trigram virtual table in 1-3 ms."""

@@ -249,32 +249,28 @@ def build_combined_filter_queries(base_search: str, filters_dict: dict):
     return queries
 
 def build_search_buttons(files, key, offset, total_results, req, settings, active_filter=None):
-    """Improvement 4: Build uniform search results with active filter chips & informative labels."""
+    """Build uniform search results with active filter chips & informative labels."""
     btn = []
     if active_filter:
         btn.append([
             InlineKeyboardButton(f"🎯 Filter: {active_filter}", callback_data=f"filter_info#{active_filter}"),
             InlineKeyboardButton("🔄 Reset Filters", callback_data=f"reset_filter#{key}")
         ])
-
     btn.append([
         InlineKeyboardButton("ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
         InlineKeyboardButton("Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
     ])
-
     btn.append([
         InlineKeyboardButton("Qᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}"),
         InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
         InlineKeyboardButton("Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
     ])
-
-    if settings.get('button', True):
+    if settings.get("button", True):
         for file in files:
             label = format_button_label(file.file_name, file.file_size)
             btn.append([InlineKeyboardButton(text=f"🔗 {label}", callback_data=f"file#{file.file_id}")])
-
     if offset != "":
-        max_btn_val = 10 if settings.get('max_btn') else int(MAX_B_TN)
+        max_btn_val = 10 if settings.get("max_btn") else int(MAX_B_TN)
         page_total = math.ceil(int(total_results) / max_btn_val)
         btn.append([
             InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"),
@@ -285,9 +281,7 @@ def build_search_buttons(files, key, offset, total_results, req, settings, activ
         btn.append([
             InlineKeyboardButton(text="↭ ɴᴏ ᴍᴏʀᴇ ᴘᴀɢᴇꜱ ᴀᴠᴀɪʟᴀʙʟᴇ ↭", callback_data="pages")
         ])
-
     return btn
-
 
 BUTTON = {}
 BUTTONS = PersistentDict("buttons_query")
@@ -419,14 +413,18 @@ async def next_page(bot, query):
         offset = int(offset)
     except:
         offset = 0
-    if BUTTONS.get(key) != None:
-        search = BUTTONS.get(key)
+    active_filters = get_active_filters(key)
+    active_chip = get_filter_chip_label(active_filters)
+    if active_filters:
+        search_input = {"search": FRESH.get(key, "").replace("_", " "), **active_filters}
+    elif BUTTONS.get(key) != None:
+        search_input = BUTTONS.get(key)
     else:
-        search = FRESH.get(key)
-    if not search:
+        search_input = FRESH.get(key)
+    if not search_input:
         await query.answer(script.OLD_ALRT_TXT.format(query.from_user.first_name), show_alert=True)
         return
-    files, n_offset, total = await get_search_results(query.message.chat.id, search, offset=offset, filter=True)
+    files, n_offset, total = await get_search_results(query.message.chat.id, search_input, offset=offset, filter=True)
     try:
         n_offset = int(n_offset)
     except:
@@ -692,9 +690,10 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
     chat_id = query.message.chat.id
     message = query.message
 
+    # Stack quality filter
     active_filters = set_active_filter(key, "quality", None if qual == "homepage" else qual.lower())
     active_chip = get_filter_chip_label(active_filters)
-    query_input = build_combined_filter_queries(search, active_filters)
+    query_input = {"search": search, **active_filters}
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
@@ -770,9 +769,10 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
     chat_id = query.message.chat.id
     message = query.message
 
+    # Stack language filter
     active_filters = set_active_filter(key, "language", None if lang == "homepage" else lang.lower())
     active_chip = get_filter_chip_label(active_filters)
-    query_input = build_combined_filter_queries(search, active_filters)
+    query_input = {"search": search, **active_filters}
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
@@ -844,6 +844,7 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
     chat_id = query.message.chat.id
     message = query.message
 
+    # Stack season filter
     if season_tag == "homepage":
         active_filters = set_active_filter(key, "season", None)
     else:
@@ -851,7 +852,7 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
         active_filters = set_active_filter(key, "season", str(season_number))
 
     active_chip = get_filter_chip_label(active_filters)
-    query_input = build_combined_filter_queries(search, active_filters)
+    query_input = {"search": search, **active_filters}
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
@@ -881,7 +882,7 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
             pass
     await query.answer()
 
-# Improvement 4: Handlers for Reset Filters and Filter Info Chips
+# Handlers for Reset Filters and Filter Info Chips
 @Client.on_callback_query(filters.regex(r"^reset_filter#"))
 async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
     _, key = query.data.split("#")
