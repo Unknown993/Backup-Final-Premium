@@ -416,9 +416,9 @@ _UNWANTED_BAD_WORDS = frozenset(word.lower() for word in BAD_WORDS)
 
 # Smart Aliases for Quality & Language
 QUALITY_ALIASES = {
-    "1080p": ["1080p", "1080", "fhd", "full hd"],
-    "720p": ["720p", "720", "hd"],
-    "480p": ["480p", "480", "sd"],
+    "1080p": ["1080p", "1080", "fhd"],
+    "720p": ["720p", "720"],
+    "480p": ["480p", "480"],
     "2160p": ["2160p", "2160", "4k", "uhd"],
     "4k": ["4k", "2160p", "2160", "uhd"],
     "360p": ["360p", "360"],
@@ -426,28 +426,87 @@ QUALITY_ALIASES = {
 }
 
 LANGUAGE_ALIASES = {
-    "hin": ["hindi", "hin", "dual", "multi"],
-    "hindi": ["hindi", "hin", "dual", "multi"],
-    "eng": ["english", "eng", "dual", "multi"],
-    "english": ["english", "eng", "dual", "multi"],
-    "tam": ["tamil", "tam", "dual", "multi"],
-    "tamil": ["tamil", "tam", "dual", "multi"],
-    "tel": ["telugu", "tel", "dual", "multi"],
-    "telugu": ["telugu", "tel", "dual", "multi"],
-    "mal": ["malayalam", "mal", "dual", "multi"],
-    "malayalam": ["malayalam", "mal", "dual", "multi"],
-    "kan": ["kannada", "kan", "dual", "multi"],
-    "kannada": ["kannada", "kan", "dual", "multi"],
+    "hin": ["hindi", "hin"],
+    "hindi": ["hindi", "hin"],
+    "eng": ["english", "eng"],
+    "english": ["english", "eng"],
+    "tam": ["tamil", "tam"],
+    "tamil": ["tamil", "tam"],
+    "tel": ["telugu", "tel"],
+    "telugu": ["telugu", "tel"],
+    "mal": ["malayalam", "mal"],
+    "malayalam": ["malayalam", "mal"],
+    "kan": ["kannada", "kan"],
+    "kannada": ["kannada", "kan"],
     "ben": ["bengali", "ben"],
     "bengali": ["bengali", "ben"],
     "mar": ["marathi", "mar"],
     "marathi": ["marathi", "mar"],
     "guj": ["gujarati", "guj"],
     "gujarati": ["gujarati", "guj"],
-    "punj": ["punjabi", "punj", "pb"],
-    "punjabi": ["punjabi", "punj", "pb"],
+    "pun": ["punjabi", "punj", "pun", "pb"],
+    "punj": ["punjabi", "punj", "pun", "pb"],
+    "punjabi": ["punjabi", "punj", "pun", "pb"],
     "urdu": ["urdu"]
 }
+
+def format_clean_file_item(file, max_len: int = 58) -> str:
+    """Format file with clean UI in strict order: Size, Quality, Language, Title."""
+    raw_name = get_display_name(file)
+    file_size = getattr(file, "file_size", 0)
+    size_str = get_size(file_size)
+    fn = str(raw_name or "").strip()
+
+    # 1. Quality badge
+    quality = ""
+    q_match = re.search(r"\b(2160p|4k|1080p|720p|480p|360p|hd|fhd|uhd)\b", fn, re.I)
+    if q_match:
+        val = q_match.group(1).upper()
+        quality = "4K" if val in ("4K", "2160P") else val
+
+    # 2. Language / Audio badge
+    audio = ""
+    if re.search(r"\b(dual(\s*audio)?)\b", fn, re.I):
+        audio = "Dual"
+    elif re.search(r"\b(multi(\s*audio)?)\b", fn, re.I):
+        audio = "Multi"
+    elif re.search(r"\b(hindi|hin)\b", fn, re.I):
+        audio = "Hin"
+    elif re.search(r"\b(english|eng)\b", fn, re.I):
+        audio = "Eng"
+    elif re.search(r"\b(tamil|tam)\b", fn, re.I):
+        audio = "Tam"
+    elif re.search(r"\b(telugu|tel)\b", fn, re.I):
+        audio = "Tel"
+    elif re.search(r"\b(malayalam|mal)\b", fn, re.I):
+        audio = "Mal"
+    elif re.search(r"\b(kannada|kan)\b", fn, re.I):
+        audio = "Kan"
+
+    badges = [size_str]
+    if quality:
+        badges.append(quality)
+    if audio:
+        badges.append(audio)
+    badge_str = f"[{' • '.join(badges)}]"
+
+    # Clean the title: remove urls, channel tags, extensions, symbols
+    clean_title = re.sub(r"https?://\S+|www\.\S+|t\.me/\S+", "", fn, flags=re.I)
+    clean_title = re.sub(r"@\w+", "", clean_title)
+    clean_title = re.sub(r"\b(mkv|mp4|avi|webm)\b", "", clean_title, flags=re.I)
+    clean_title = re.sub(r"\[.*?\]|\(.*?\)", " ", clean_title)
+    clean_title = re.sub(r"[\W_]+", " ", clean_title)
+    words = [w for w in clean_title.split() if w.lower() not in _UNWANTED_BAD_WORDS]
+    clean_title = " ".join(words).strip()
+    if not clean_title:
+        clean_title = fn
+
+    if max_len:
+        avail_len = max_len - len(badge_str) - 2
+        if avail_len > 10 and len(clean_title) > avail_len:
+            clean_title = clean_title[:avail_len - 1].rstrip() + "…"
+
+    return f"{badge_str} {clean_title}".strip()
 
 def get_display_name(file) -> str:
     """Return raw file title as stored in DB without cleaning, falling back to caption if file_name is None/empty."""
@@ -885,7 +944,7 @@ async def get_cap(settings, remaining_seconds, files, query, total_results, sear
                             f"<a href='https://telegram.me/{temp.U_NAME}"
                             f"?start=file_{query.message.chat.id}_{file.file_id}'>"
                             f"[{get_size(file.file_size)}] "
-                            f"{get_display_name(file)}\n\n"
+                            f"{format_clean_file_item(file, max_len=0)}\n\n"
                             f"</a></b>"
                         )
             else:
@@ -933,7 +992,7 @@ async def get_cap(settings, remaining_seconds, files, query, total_results, sear
                             f"<a href='https://telegram.me/{temp.U_NAME}"
                             f"?start=file_{query.message.chat.id}_{file.file_id}'>"
                             f"[{get_size(file.file_size)}] "
-                            f"{get_display_name(file)}\n\n"
+                            f"{format_clean_file_item(file, max_len=0)}\n\n"
                             f"</a></b>"
                         )
                 else:
@@ -959,7 +1018,7 @@ async def get_cap(settings, remaining_seconds, files, query, total_results, sear
                             f"<a href='https://telegram.me/{temp.U_NAME}"
                             f"?start=file_{query.message.chat.id}_{file.file_id}'>"
                             f"[{get_size(file.file_size)}] "
-                            f"{get_display_name(file)}\n\n"
+                            f"{format_clean_file_item(file, max_len=0)}\n\n"
                             f"</a></b>"
                         )
 
@@ -986,7 +1045,7 @@ async def get_cap(settings, remaining_seconds, files, query, total_results, sear
                             f"<a href='https://telegram.me/{temp.U_NAME}"
                             f"?start=file_{query.message.chat.id}_{file.file_id}'>"
                             f"[{get_size(file.file_size)}] "
-                            f"{get_display_name(file)}\n\n"
+                            f"{format_clean_file_item(file, max_len=0)}\n\n"
                             f"</a></b>"
                         )
         return cap

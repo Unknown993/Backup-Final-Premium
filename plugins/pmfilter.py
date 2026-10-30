@@ -1,4 +1,4 @@
-from utils import get_size, get_display_name, is_subscribed, is_req_subscribed, group_setting_buttons, get_poster, get_posterx, temp, get_settings, save_group_settings, get_cap, imdb, is_check_admin, extract_request_content, log_error, clean_filename, generate_season_variations, clean_search_text
+from utils import get_size, format_clean_file_item, get_display_name, is_subscribed, is_req_subscribed, group_setting_buttons, get_poster, get_posterx, temp, get_settings, save_group_settings, get_cap, imdb, is_check_admin, extract_request_content, log_error, clean_filename, generate_season_variations, clean_search_text
 from fuzzywuzzy import process
 from dreamxbotz.util.file_properties import get_name, get_hash
 from urllib.parse import quote_plus
@@ -645,6 +645,31 @@ async def advantage_spoll_choker(bot, query):
         await asyncio.sleep(10)
         await k.delete()
 
+async def edit_search_message(query: CallbackQuery, text_or_cap: str, reply_markup: InlineKeyboardMarkup):
+    """Safely edit search message whether it is a photo (caption) or text message."""
+    try:
+        if getattr(query.message, "caption", None) or getattr(query.message, "photo", None):
+            await query.message.edit_caption(
+                caption=text_or_cap,
+                reply_markup=reply_markup,
+                parse_mode=enums.ParseMode.HTML
+            )
+        else:
+            await query.message.edit_text(
+                text=text_or_cap,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+                parse_mode=enums.ParseMode.HTML
+            )
+    except MessageNotModified:
+        pass
+    except Exception as e:
+        logger.warning(f"edit_search_message fallback to edit_reply_markup: {e}")
+        try:
+            await query.edit_message_reply_markup(reply_markup=reply_markup)
+        except Exception:
+            pass
+
 # Qualities
 @Client.on_callback_query(filters.regex(r"^qualities#"))
 async def qualities_cb_handler(client: Client, query: CallbackQuery):
@@ -669,7 +694,7 @@ async def qualities_cb_handler(client: Client, query: CallbackQuery):
             row.append(InlineKeyboardButton(text=q2, callback_data=f"fq#{q2.lower()}#{key}"))
         btn.append(row)
     btn.append([
-        InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"reset_filter#{key}")
+        InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"back_filter#{key}")
     ])
     try:
         await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
@@ -711,11 +736,8 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
             timedelta(hours=curr_time.hour, minutes=curr_time.minute, seconds=(curr_time.second+(curr_time.microsecond/1000000)))
         remaining_seconds = "{:.2f}".format(time_difference.total_seconds())
         dreamx_title = clean_search_text(search)
-        cap = await get_cap(settings, remaining_seconds, files, query, total_results, dreamx_title, offset=1)
-        try:
-            await query.message.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
-        except MessageNotModified:
-            pass
+        cap = await get_cap(settings, remaining_seconds, files, query, total_results, dreamx_title, offset=0)
+        await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
     else:
         try:
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
@@ -749,7 +771,7 @@ async def languages_cb_handler(client: Client, query: CallbackQuery):
             name2, code2 = items[i + 1]
             row.append(InlineKeyboardButton(text=name2, callback_data=f"fl#{code2}#{key}"))
         btn.append(row)
-    btn.append([InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"reset_filter#{key}")])
+    btn.append([InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"back_filter#{key}")])
     try:
         await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
     except MessageNotModified:
@@ -790,11 +812,8 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
             timedelta(hours=curr_time.hour, minutes=curr_time.minute, seconds=(curr_time.second+(curr_time.microsecond/1000000)))
         remaining_seconds = "{:.2f}".format(time_difference.total_seconds())
         dreamx_title = clean_search_text(search)
-        cap = await get_cap(settings, remaining_seconds, files, query, total_results, dreamx_title, offset=1)
-        try:
-            await query.message.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
-        except MessageNotModified:
-            pass
+        cap = await get_cap(settings, remaining_seconds, files, query, total_results, dreamx_title, offset=0)
+        await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
     else:
         try:
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
@@ -824,7 +843,7 @@ async def seasons_cb_handler(client: Client, query: CallbackQuery):
             InlineKeyboardButton(f"Sᴇᴀꜱᴏɴ {SEASONS[i][1:]}", callback_data=f"fs#{SEASONS[i].lower()}#{key}"),
             InlineKeyboardButton(f"Sᴇᴀꜱᴏɴ {SEASONS[i+1][1:]}", callback_data=f"fs#{SEASONS[i+1].lower()}#{key}")
         ])
-    btn.append([InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"reset_filter#{key}")])
+    btn.append([InlineKeyboardButton(text="↭ ʙᴀᴄᴋ ᴛᴏ ꜰɪʟᴇs ↭", callback_data=f"back_filter#{key}")])
     try:
         await query.edit_message_reply_markup(InlineKeyboardMarkup(btn))
     except MessageNotModified:
@@ -871,11 +890,8 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
             timedelta(hours=curr_time.hour, minutes=curr_time.minute, seconds=(curr_time.second+(curr_time.microsecond/1000000)))
         remaining_seconds = "{:.2f}".format(time_difference.total_seconds())
         dreamx_title = clean_search_text(search)
-        cap = await get_cap(settings, remaining_seconds, files, query, total_results, dreamx_title, offset=1)
-        try:
-            await query.message.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
-        except MessageNotModified:
-            pass
+        cap = await get_cap(settings, remaining_seconds, files, query, total_results, dreamx_title, offset=0)
+        await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
     else:
         try:
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
@@ -884,6 +900,38 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
     await query.answer()
 
 # Handlers for Reset Filters and Filter Info Chips
+@Client.on_callback_query(filters.regex(r"^back_filter#"))
+async def back_filter_cb_handler(client: Client, query: CallbackQuery):
+    _, key = query.data.split("#")
+    search = FRESH.get(key)
+    if not search:
+        search = BUTTONS.get(key)
+    if not search:
+        return await query.answer("Search expired! Please search again.", show_alert=True)
+    search = search.replace("_", " ").strip()
+    active_filters = get_active_filters(key)
+    active_chip = get_filter_chip_label(active_filters)
+    query_input = {"search": search, **active_filters} if active_filters else search
+    chat_id = query.message.chat.id
+    req = query.from_user.id
+    files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
+    if not files:
+        return await query.answer("🚫 ɴᴏ ꜰɪʟᴇꜱ ᴡᴇʀᴇ ꜰᴏᴜɴᴅ 🚫", show_alert=1)
+    temp.GETALL[key] = files
+    cache_save_getall(key, [f.file_id for f in files])
+    settings = await get_settings(chat_id)
+    btn = build_search_buttons(files, key, offset, total_results, req, settings, active_filter=active_chip)
+    if not settings.get("button"):
+        dreamx_title = clean_search_text(search)
+        cap = await get_cap(settings, "0.10", files, query, total_results, dreamx_title, offset=0)
+        await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
+    else:
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
+        except MessageNotModified:
+            pass
+    await query.answer()
+
 @Client.on_callback_query(filters.regex(r"^reset_filter#"))
 async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
     _, key = query.data.split("#")
@@ -904,11 +952,8 @@ async def reset_filter_cb_handler(client: Client, query: CallbackQuery):
     btn = build_search_buttons(files, key, offset, total_results, req, settings, active_filter=None)
     if not settings.get("button"):
         dreamx_title = clean_search_text(search)
-        cap = await get_cap(settings, "0.10", files, query, total_results, dreamx_title, offset=1)
-        try:
-            await query.message.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
-        except MessageNotModified:
-            pass
+        cap = await get_cap(settings, "0.10", files, query, total_results, dreamx_title, offset=0)
+        await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
     else:
         try:
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
@@ -2064,7 +2109,7 @@ async def auto_filter(client, msg, spoll=False):
             if not settings.get('button'):
                 cap += "\n\n<b><u>Your Requested Files Are Here</u></b>\n\n"
                 for idx, file in enumerate(files, start=1):
-                    cap += f"<b>\n{idx}. <a href='https://telegram.me/{temp.U_NAME}?start=file_{message.chat.id}_{file.file_id}'>[{get_size(file.file_size)}] {get_display_name(file)}\n</a></b>"
+                    cap += f"<b>\n{idx}. <a href='https://telegram.me/{temp.U_NAME}?start=file_{message.chat.id}_{file.file_id}'>[{get_size(file.file_size)}] {format_clean_file_item(file, max_len=0)}\n</a></b>"
         else:
             temp.IMDB_CAP[message.from_user.id] = None
             if ULTRA_FAST_MODE:
@@ -2073,7 +2118,7 @@ async def auto_filter(client, msg, spoll=False):
                 else:
                     cap = f"<b>🏷 ᴛɪᴛʟᴇ : <code>{search}</code>\n⏰ ʀᴇsᴜʟᴛ ɪɴ : <code>{remaining_seconds} Sᴇᴄᴏɴᴅs</code>\n\n📝 ʀᴇǫᴜᴇsᴛᴇᴅ ʙʏ : {message.from_user.mention}\n⚜️ ᴘᴏᴡᴇʀᴇᴅ ʙʏ : ⚡ {message.chat.title or temp.B_LINK or 'iP Update'} \n\n<u>Your Requested Files Are Here</u> \n\n</b>"
                     for idx, file in enumerate(files, start=1):
-                        cap += f"<b>\n{idx}. <a href='https://telegram.me/{temp.U_NAME}?start=file_{message.chat.id}_{file.file_id}'>[{get_size(file.file_size)}] {get_display_name(file)}\n</a></b>"
+                        cap += f"<b>\n{idx}. <a href='https://telegram.me/{temp.U_NAME}?start=file_{message.chat.id}_{file.file_id}'>[{get_size(file.file_size)}] {format_clean_file_item(file, max_len=0)}\n</a></b>"
             else:
                 if settings.get('button'):
                     cap = f"<b>🏷 ᴛɪᴛʟᴇ : <code>{search}</code>\n🧱 ᴛᴏᴛᴀʟ ꜰɪʟᴇꜱ : <code>{total_results}</code>\n⏰ ʀᴇsᴜʟᴛ ɪɴ : <code>{remaining_seconds} Sᴇᴄᴏɴᴅs</code>\n\n📝 ʀᴇǫᴜᴇsᴛᴇᴅ ʙʏ : {message.from_user.mention}\n⚜️ ᴘᴏᴡᴇʀᴇᴅ ʙʏ : ⚡ {message.chat.title or temp.B_LINK or 'iP Update'} \n\n<u>Your Requested Files Are Here</u> \n\n</b>"
@@ -2081,7 +2126,7 @@ async def auto_filter(client, msg, spoll=False):
                     cap = f"<b>🏷 ᴛɪᴛʟᴇ : <code>{search}</code>\n🧱 ᴛᴏᴛᴀʟ ꜰɪʟᴇꜱ : <code>{total_results}</code>\n⏰ ʀᴇsᴜʟᴛ ɪɴ : <code>{remaining_seconds} Sᴇᴄᴏɴᴅs</code>\n\n📝 ʀᴇǫᴜᴇsᴛᴇᴅ ʙʏ : {message.from_user.mention}\n⚜️ ᴘᴏᴡᴇʀᴇᴅ ʙʏ : ⚡ {message.chat.title or temp.B_LINK or 'iP Update'} \n\n<u>Your Requested Files Are Here</u> \n\n</b>"
 
                     for idx, file in enumerate(files, start=1):
-                        cap += f"<b>\n{idx}. <a href='https://telegram.me/{temp.U_NAME}?start=file_{message.chat.id}_{file.file_id}'>[{get_size(file.file_size)}] {get_display_name(file)}\n</a></b>"
+                        cap += f"<b>\n{idx}. <a href='https://telegram.me/{temp.U_NAME}?start=file_{message.chat.id}_{file.file_id}'>[{get_size(file.file_size)}] {format_clean_file_item(file, max_len=0)}\n</a></b>"
 
         sent = None
         try:

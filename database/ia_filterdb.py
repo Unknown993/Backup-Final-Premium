@@ -196,7 +196,7 @@ def build_mongo_filter(query, file_type=None):
         if "quality" in query and query["quality"]:
             q_val = str(query["quality"]).lower()
             q_aliases = QUALITY_ALIASES.get(q_val, [q_val])
-            q_regex = re.compile(r"(" + "|".join(re.escape(a) for a in q_aliases) + r")", re.IGNORECASE)
+            q_regex = re.compile(r"\b(" + "|".join(re.escape(a) for a in q_aliases) + r")\b", re.IGNORECASE)
             if USE_CAPTION_FILTER:
                 and_conditions.append({"$or": [{"file_name": q_regex}, {"caption": q_regex}]})
             else:
@@ -204,7 +204,7 @@ def build_mongo_filter(query, file_type=None):
         if "language" in query and query["language"]:
             l_val = str(query["language"]).lower()
             l_aliases = LANGUAGE_ALIASES.get(l_val, [l_val])
-            l_regex = re.compile(r"(" + "|".join(re.escape(a) for a in l_aliases) + r")", re.IGNORECASE)
+            l_regex = re.compile(r"\b(" + "|".join(re.escape(a) for a in l_aliases) + r")\b", re.IGNORECASE)
             if USE_CAPTION_FILTER:
                 and_conditions.append({"$or": [{"file_name": l_regex}, {"caption": l_regex}]})
             else:
