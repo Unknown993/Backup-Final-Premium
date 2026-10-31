@@ -1444,3 +1444,71 @@ async def reset_trial(client, message):
         await message.reply_text(message_text)
     except Exception as e:
         await message.reply_text(f"An error occurred: {e}")
+
+
+# ==============================================================================
+# SEARCH DIAGNOSTICS & ANALYTICS (Sections 10 & 11)
+# ==============================================================================
+
+@Client.on_message(filters.command("search_debug") & filters.user(ADMINS))
+async def search_debug_cmd(client: Client, message: Message):
+    if len(message.command) < 2:
+        return await message.reply_text("<b>Usage:</b> <code>/search_debug &lt;query&gt;</code>")
+    raw_query = message.text.split(None, 1)[1].strip()
+    
+    t0 = time.time()
+    from database.search_engine import parse_user_query, calculate_relevance_score, build_mongo_search_query, GLOBAL_SEARCH_ANALYTICS
+    from database.ia_filterdb import get_search_results
+    
+    parsed = parse_user_query(raw_query)
+    chat_id = message.chat.id
+    files, next_offset, total_results = await get_search_results(chat_id, raw_query, offset=0, filter=True)
+    latency_ms = (time.time() - t0) * 1000
+
+    breakdown_lines = []
+    for idx, f in enumerate(files[:3], start=1):
+        fn = getattr(f, "file_name", "Unknown")
+        sc = calculate_relevance_score(fn, parsed)
+        sz = get_size(getattr(f, "file_size", 0))
+        breakdown_lines.append(f"  {idx}. <code>{fn}</code>\n     • Score: <b>{sc}</b> | Size: <b>{sz}</b>")
+    
+    top_files_str = "\n".join(breakdown_lines) if breakdown_lines else "  <i>No files matched query.</i>"
+    
+    text = (
+        f"🔍 <b>SEARCH DIAGNOSTICS REPORT</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Raw Query:</b> <code>{raw_query}</code>\n"
+        f"<b>Parsed Title:</b> <code>{parsed.get('title')}</code>\n"
+        f"<b>Parsed Year:</b> <code>{parsed.get('year') or 'N/A'}</code>\n"
+        f"<b>Parsed Language:</b> <code>{parsed.get('language') or 'N/A'}</code>\n"
+        f"<b>Parsed Quality:</b> <code>{parsed.get('quality') or 'N/A'}</code>\n"
+        f"<b>Parsed Season:</b> <code>{parsed.get('season') or 'N/A'}</code>\n"
+        f"<b>Universal Audio:</b> <code>{parsed.get('universal_audio')}</code>\n"
+        f"──────────────────────\n"
+        f"<b>Search Engine:</b> <code>MongoDB token boundary regex</code>\n"
+        f"<b>Execution Latency:</b> <code>{latency_ms:.2f} ms</code>\n"
+        f"<b>Total Matched:</b> <code>{total_results} documents</code>\n"
+        f"<b>Page 1 Returned:</b> <code>{len(files)} items</code>\n"
+        f"──────────────────────\n"
+        f"<b>Top Candidates & Relevance Breakdown:</b>\n"
+        f"{top_files_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+
+
+@Client.on_message(filters.command("search_stats") & filters.user(ADMINS))
+async def search_stats_cmd(client: Client, message: Message):
+    from database.search_engine import GLOBAL_SEARCH_ANALYTICS
+    stats = GLOBAL_SEARCH_ANALYTICS.get_stats()
+    text = (
+        f"📊 <b>SEARCH ENGINE ANALYTICS</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>Total Searches:</b> <code>{stats.get('total_queries', 0)}</code>\n"
+        f"<b>Zero Result Count:</b> <code>{stats.get('zero_result_queries', 0)}</code>\n"
+        f"<b>Zero Result Rate:</b> <code>{stats.get('zero_result_rate', '0%')}</code>\n"
+        f"<b>Average Latency:</b> <code>{stats.get('avg_latency_ms', 0)} ms</code>\n"
+        f"<b>Active Filters Used:</b> <code>{stats.get('active_filters_used', 0)}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    await message.reply_text(text, parse_mode=enums.ParseMode.HTML)

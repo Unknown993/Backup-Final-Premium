@@ -413,44 +413,36 @@ async def save_group_settings(group_id, key, value):
     temp.SETTINGS.update({group_id: current})
     await db.update_settings(group_id, current)
 
+from database.search_engine import (
+    LANGUAGE_MAP,
+    QUALITY_MAP,
+    UNIVERSAL_AUDIO_TAGS,
+    canonicalize_language,
+    canonicalize_quality,
+    build_language_regex,
+    build_quality_regex,
+    build_season_regex,
+    build_universal_audio_regex,
+    matches_language,
+    matches_quality,
+    matches_season,
+    parse_user_query,
+    calculate_relevance_score,
+    rank_media_results,
+    clean_media_title_for_comparison,
+)
+
 _CLEAN_FILENAME_PREFIXES = ('[', '@', 'www.')
 _UNWANTED_BAD_WORDS = frozenset(word.lower() for word in BAD_WORDS)
 
-# Smart Aliases for Quality & Language
-QUALITY_ALIASES = {
-    "1080p": ["1080p", "1080", "fhd"],
-    "720p": ["720p", "720"],
-    "480p": ["480p", "480"],
-    "2160p": ["2160p", "2160", "4k", "uhd"],
-    "4k": ["4k", "2160p", "2160", "uhd"],
-    "360p": ["360p", "360"],
-    "1440p": ["1440p", "1440", "2k"]
-}
-
-LANGUAGE_ALIASES = {
-    "hin": ["hindi", "hin"],
-    "hindi": ["hindi", "hin"],
-    "eng": ["english", "eng"],
-    "english": ["english", "eng"],
-    "tam": ["tamil", "tam"],
-    "tamil": ["tamil", "tam"],
-    "tel": ["telugu", "tel"],
-    "telugu": ["telugu", "tel"],
-    "mal": ["malayalam", "mal"],
-    "malayalam": ["malayalam", "mal"],
-    "kan": ["kannada", "kan"],
-    "kannada": ["kannada", "kan"],
-    "ben": ["bengali", "ben"],
-    "bengali": ["bengali", "ben"],
-    "mar": ["marathi", "mar"],
-    "marathi": ["marathi", "mar"],
-    "guj": ["gujarati", "guj"],
-    "gujarati": ["gujarati", "guj"],
-    "pun": ["punjabi", "punj", "pun", "pb"],
-    "punj": ["punjabi", "punj", "pun", "pb"],
-    "punjabi": ["punjabi", "punj", "pun", "pb"],
-    "urdu": ["urdu"]
-}
+# Single Source of Truth for Quality & Language (backed by search_engine.py)
+QUALITY_ALIASES = {k: list(v) for k, v in QUALITY_MAP.items()}
+LANGUAGE_ALIASES = {}
+for _l_name, _l_aliases in LANGUAGE_MAP.items():
+    _combined = list(_l_aliases) + list(UNIVERSAL_AUDIO_TAGS)
+    LANGUAGE_ALIASES[_l_name] = _combined
+    for _alias in _l_aliases:
+        LANGUAGE_ALIASES[_alias.lower()] = _combined
 
 def format_clean_file_item(file, max_len: int = 0) -> str:
     """Return clean file title directly as it is without artificial formatting."""

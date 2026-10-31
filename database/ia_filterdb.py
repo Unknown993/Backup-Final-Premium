@@ -1,7 +1,15 @@
 from utils import QUALITY_ALIASES, LANGUAGE_ALIASES
+from database.search_engine import (
+    build_mongo_search_query,
+    parse_user_query,
+    rank_media_results,
+    GLOBAL_SEARCH_CACHE,
+    GLOBAL_SEARCH_ANALYTICS,
+)
 import logging
 from struct import pack
 import re
+import time
 import base64
 from pyrogram.file_id import FileId
 from typing import Dict, List
@@ -202,84 +210,8 @@ def _build_fts_query(query):
 
 
 def build_mongo_filter(query, file_type=None):
-    """Construct MongoDB query condition cleanly supporting multi-filter dicts, lists, and strings."""
-    if isinstance(query, dict):
-        base_search = query.get("search", "").strip()
-        base_words = [w for w in base_search.split() if w]
-        and_conditions = []
-        if base_words:
-            # Word boundaries preserve numbers and short tokens (e.g. Iron Man 2 vs Iron Woman)
-            pattern = r".*".join(rf"\b{re.escape(w)}\b" if re.match(r'^\w+$', w) else re.escape(w) for w in base_words)
-            base_regex = re.compile(pattern, re.IGNORECASE)
-            if USE_CAPTION_FILTER:
-                and_conditions.append({"$or": [{"file_name": base_regex}, {"caption": base_regex}]})
-            else:
-                and_conditions.append({"file_name": base_regex})
-        if "season" in query and query["season"]:
-            s_num = int(query["season"])
-            s_pats = [re.escape(f"s{s_num:02d}"), re.escape(f"s{s_num}"), re.escape(f"season {s_num}"), re.escape(f"season {s_num:02d}"), re.escape(f"season{s_num}")]
-            s_regex = re.compile(r"(" + "|".join(s_pats) + r")", re.IGNORECASE)
-            if USE_CAPTION_FILTER:
-                and_conditions.append({"$or": [{"file_name": s_regex}, {"caption": s_regex}]})
-            else:
-                and_conditions.append({"file_name": s_regex})
-        if "quality" in query and query["quality"]:
-            q_val = str(query["quality"]).lower()
-            q_aliases = QUALITY_ALIASES.get(q_val, [q_val])
-            q_regex = re.compile(r"\b(" + "|".join(re.escape(a) for a in q_aliases) + r")\b", re.IGNORECASE)
-            if USE_CAPTION_FILTER:
-                and_conditions.append({"$or": [{"file_name": q_regex}, {"caption": q_regex}]})
-            else:
-                and_conditions.append({"file_name": q_regex})
-        if "language" in query and query["language"]:
-            l_val = str(query["language"]).lower()
-            l_aliases = LANGUAGE_ALIASES.get(l_val, [l_val])
-            l_regex = re.compile(r"\b(" + "|".join(re.escape(a) for a in l_aliases) + r")\b", re.IGNORECASE)
-            if USE_CAPTION_FILTER:
-                and_conditions.append({"$or": [{"file_name": l_regex}, {"caption": l_regex}]})
-            else:
-                and_conditions.append({"file_name": l_regex})
-        filter_mongo = {"$and": and_conditions} if and_conditions else {}
-    elif isinstance(query, list):
-        regex_list = []
-        for q in query:
-            q_clean = q.strip()
-            if not q_clean:
-                continue
-            words = [w for w in q_clean.split()]
-            pattern = r'.*'.join(rf"\b{re.escape(w)}\b" if re.match(r'^\w+$', w) else re.escape(w) for w in words)
-            try:
-                regex_list.append(re.compile(pattern, re.IGNORECASE))
-            except re.error:
-                pass
-        if regex_list:
-            if USE_CAPTION_FILTER:
-                filter_mongo = {"$or": ([{"file_name": r} for r in regex_list] + [{"caption": r} for r in regex_list])}
-            else:
-                filter_mongo = {"$or": [{"file_name": r} for r in regex_list]}
-        else:
-            filter_mongo = {}
-    else:
-        q_str = str(query or "").strip()
-        if not q_str:
-            return {}
-        if ' ' in q_str:
-            words = [word for word in q_str.split()]
-            raw_pattern = r'.*'.join(rf"\b{re.escape(w)}\b" if re.match(r'^\w+$', w) else re.escape(w) for w in words)
-        else:
-            raw_pattern = rf"\b{re.escape(q_str)}\b" if re.match(r'^\w+$', q_str) else re.escape(q_str)
-        try:
-            regex = re.compile(raw_pattern, flags=re.IGNORECASE)
-            if USE_CAPTION_FILTER:
-                filter_mongo = {"$or": [{"file_name": regex}, {"caption": regex}]}
-            else:
-                filter_mongo = {"file_name": regex}
-        except re.error:
-            filter_mongo = {}
-
-    if file_type:
-        filter_mongo["file_type"] = file_type
-    return filter_mongo
+    """Construct MongoDB query condition cleanly using the unified search engine."""
+    return build_mongo_search_query(query, file_type=file_type, use_caption=USE_CAPTION_FILTER)
 
 def query_fts(query, file_type=None, max_results=10, offset=0):
     """Query SQLite FTS5 trigram virtual table in 1-3 ms."""
@@ -589,7 +521,15 @@ async def save_file(media):
     )
     return True, 1
 
+async def _fetch_candidates(model, filter_query, limit_val):
+    try:
+        return await model.find(filter_query).sort("$natural", -1).limit(limit_val).to_list(length=limit_val)
+    except Exception:
+        raw_list = await model.collection.find(filter_query).limit(limit_val).to_list(length=limit_val)
+        return [model.build_from_mongo(d) for d in raw_list]
+
 async def get_search_results(chat_id, query, file_type=None, max_results=None, offset=0, filter=False):
+    t_start = time.time()
     if chat_id is not None:
         settings = await get_settings(int(chat_id))
         if max_results is None:
@@ -599,71 +539,59 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
                 await save_group_settings(int(chat_id), "max_btn", True)
                 settings = await get_settings(int(chat_id))
                 max_results = 10 if settings.get("max_btn") else int(MAX_B_TN)
+    if max_results is None:
+        max_results = 10
 
-    # Fast Path: Query SQLite FTS5 with trigram tokenizer (sub-3ms)
-    fts_files, fts_next_offset, fts_total = query_fts(query, file_type=file_type, max_results=max_results, offset=offset)
-    if fts_files is not None:
-        return fts_files, fts_next_offset, fts_total
-
-    # Fallback Path: MongoDB regex search if SQLite FTS has 0 matches or empty catalog
-    filter_mongo = build_mongo_filter(query, file_type=file_type)
-    if not filter_mongo:
-        return [], None, 0
-    
-    # The rest of the function remains the same, using parallel queries.
-    if ULTRA_FAST_MODE:
-        limit = max_results + 1
-        if not MULTIPLE_DB:
-            files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)
-        else:
-            count1 = await Media.count_documents(filter_mongo)
-            files = []
-            if offset < count1:
-                take1 = min(limit, count1 - offset)
-                files1 = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(take1).to_list(length=take1)
-                files.extend(files1)
-                if len(files) < limit:
-                    needed = limit - len(files)
-                    files2 = await Media2.find(filter_mongo).sort("$natural", -1).skip(0).limit(needed).to_list(length=needed)
-                    files.extend(files2)
-            else:
-                offset2 = offset - count1
-                files = await Media2.find(filter_mongo).sort("$natural", -1).skip(offset2).limit(limit).to_list(length=limit)
-
-        has_next_page = len(files) > max_results
-        if has_next_page:
-            files = files[:max_results]
-
-        next_offset = offset + len(files) if has_next_page else ""
-        total_results = offset + len(files) + (1 if has_next_page else 0)
+    # Parse query representation for cache and ranking
+    if isinstance(query, dict):
+        base_search = query.get("search", "")
+        f_dict = {k: v for k, v in query.items() if k != "search" and v is not None}
+        parsed = parse_user_query(base_search)
     else:
-        if not MULTIPLE_DB:
-            count_task = Media.count_documents(filter_mongo)
-            find_task = Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(max_results).to_list(length=max_results)
-            total_results, files = await asyncio.gather(count_task, find_task)
-            next_offset = offset + len(files)
-            if next_offset >= total_results:
-                next_offset = ""
-        else:
-            count1 = await Media.count_documents(filter_mongo)
-            count2 = await Media2.count_documents(filter_mongo)
-            total_results = count1 + count2
-            files = []
-            if offset < count1:
-                take1 = min(max_results, count1 - offset)
-                files1 = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(take1).to_list(length=take1)
-                files.extend(files1)
-                if len(files) < max_results:
-                    needed = max_results - len(files)
-                    files2 = await Media2.find(filter_mongo).sort("$natural", -1).skip(0).limit(needed).to_list(length=needed)
-                    files.extend(files2)
-            else:
-                offset2 = offset - count1
-                files = await Media2.find(filter_mongo).sort("$natural", -1).skip(offset2).limit(max_results).to_list(length=max_results)
+        base_search = str(query or "")
+        f_dict = {}
+        parsed = parse_user_query(base_search)
 
-            next_offset = offset + len(files)
-            if next_offset >= total_results:
-                next_offset = ""
+    query_norm = (parsed.get("title") or base_search).strip().lower()
+
+    # Check search cache (Section 11.D)
+    cached = GLOBAL_SEARCH_CACHE.get(query_norm, f_dict, offset, max_results)
+    if cached is not None:
+        c_files, c_next, c_total = cached
+        duration_ms = (time.time() - t_start) * 1000
+        GLOBAL_SEARCH_ANALYTICS.record_search(base_search, c_total, duration_ms, f_dict)
+        return c_files, c_next, c_total
+
+    filter_mongo = build_mongo_search_query(query, file_type=file_type, use_caption=USE_CAPTION_FILTER)
+    if not filter_mongo:
+        return [], "", 0
+
+    # MongoDB search execution (preserving async design, no SQLite FTS5)
+    limit = max_results + 1
+    fetch_limit = max(offset + limit, 100)
+    if not MULTIPLE_DB:
+        count_task = Media.count_documents(filter_mongo)
+        find_task = _fetch_candidates(Media, filter_mongo, fetch_limit)
+        total_results, raw_candidates = await asyncio.gather(count_task, find_task)
+        ranked_candidates = rank_media_results(raw_candidates, parsed)
+        files = ranked_candidates[offset:offset + max_results]
+        next_offset = str(offset + len(files)) if (offset + len(files) < total_results) else ""
+    else:
+        count1_task = Media.count_documents(filter_mongo)
+        count2_task = Media2.count_documents(filter_mongo)
+        count1, count2 = await asyncio.gather(count1_task, count2_task)
+        total_results = count1 + count2
+        task1 = _fetch_candidates(Media, filter_mongo, fetch_limit)
+        task2 = _fetch_candidates(Media2, filter_mongo, fetch_limit)
+        raw1, raw2 = await asyncio.gather(task1, task2)
+        combined_raw = raw1 + raw2
+        ranked_candidates = rank_media_results(combined_raw, parsed)
+        files = ranked_candidates[offset:offset + max_results]
+        next_offset = str(offset + len(files)) if (offset + len(files) < total_results) else ""
+
+    duration_ms = (time.time() - t_start) * 1000
+    GLOBAL_SEARCH_CACHE.set(query_norm, f_dict, offset, max_results, files, total_results)
+    GLOBAL_SEARCH_ANALYTICS.record_search(base_search, total_results, duration_ms, f_dict)
 
     return files, next_offset, total_results
 
@@ -698,16 +626,6 @@ async def get_bad_files(query, file_type=None):
 
 
 async def get_file_details(query):
-    # Check SQLite catalog first for instant response
-    try:
-        conn = get_fts_connection()
-        cur = conn.execute("SELECT file_id, file_ref, file_name, file_size, file_type, mime_type, caption FROM media_catalog WHERE file_id = ?", (query,))
-        row = cur.fetchone()
-        if row:
-            return [FTSMedia(*row)]
-    except Exception as e:
-        logger.error(f"FTS get_file_details error: {e}")
-
     filter = {"file_id": query}
     
     tasks = [Media.find(filter).to_list(length=1)]

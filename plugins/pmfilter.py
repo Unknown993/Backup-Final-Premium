@@ -1,3 +1,4 @@
+import json
 from utils import get_size, format_clean_file_item, get_display_name, is_subscribed, is_req_subscribed, group_setting_buttons, get_poster, get_posterx, temp, get_settings, save_group_settings, get_cap, imdb, is_check_admin, extract_request_content, log_error, clean_filename, generate_season_variations, clean_search_text
 from fuzzywuzzy import process
 from dreamxbotz.util.file_properties import get_name, get_hash
@@ -27,6 +28,15 @@ logger.setLevel(logging.ERROR)
 
 TIMEZONE = "Asia/Kolkata"
 from database.ia_filterdb import cache_set_field, cache_get_field, cache_save_getall, cache_get_getall, drop_fts_catalog, delete_from_fts
+from database.search_engine import (
+    GLOBAL_SESSION_MANAGER,
+    parse_user_query,
+    canonicalize_language,
+    canonicalize_quality,
+    LANGUAGE_MAP,
+    QUALITY_MAP,
+    UNIVERSAL_AUDIO_TAGS,
+)
 
 class PersistentDict(dict):
     """Thread-safe dictionary backed by SQLite for zero cache-loss across bot reboots."""
@@ -167,14 +177,25 @@ def set_active_filter(key: str, filter_type: str, value: str):
     if value == "homepage" or value is None:
         f.pop(filter_type, None)
     else:
-        f[filter_type] = value
+        if filter_type == "quality":
+            f[filter_type] = canonicalize_quality(value) or value
+        elif filter_type == "language":
+            f[filter_type] = canonicalize_language(value) or value
+        else:
+            f[filter_type] = value
     ACTIVE_FILTERS[key] = f
     cache_set_field(str(key), "buttons_query", json.dumps(f))
+    sess = GLOBAL_SESSION_MANAGER.get(key)
+    if sess:
+        sess.set_filter(filter_type, value)
     return f
 
 def clear_active_filters(key: str):
     ACTIVE_FILTERS.pop(key, None)
     cache_set_field(str(key), "buttons_query", "{}")
+    sess = GLOBAL_SESSION_MANAGER.get(key)
+    if sess:
+        sess.reset_filters()
 
 def get_filter_chip_label(active_filters: dict) -> str:
     chips = []
@@ -185,6 +206,28 @@ def get_filter_chip_label(active_filters: dict) -> str:
     if "language" in active_filters:
         chips.append(active_filters["language"].title())
     return " • ".join(chips) if chips else None
+
+def build_empty_filter_buttons(key: str, active_filter: str = None):
+    """Build persistent filter control bar when a filter yields 0 results."""
+    btn = []
+    if active_filter:
+        btn.append([
+            InlineKeyboardButton(f"🎯 Filter: {active_filter}", callback_data=f"filter_info#{active_filter}"),
+            InlineKeyboardButton("🔄 Reset Filters", callback_data=f"reset_filter#{key}")
+        ])
+    else:
+        btn.append([
+            InlineKeyboardButton("🔄 Reset Filters", callback_data=f"reset_filter#{key}")
+        ])
+    btn.append([
+        InlineKeyboardButton("Qᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}"),
+        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
+        InlineKeyboardButton("Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
+    ])
+    btn.append([
+        InlineKeyboardButton("↭ ɴᴏ ʀᴇsᴜʟᴛs ꜰᴏᴜɴᴅ ↭", callback_data="pages")
+    ])
+    return btn
 
 def build_combined_filter_queries(base_search: str, filters_dict: dict):
     if not filters_dict:
@@ -402,184 +445,86 @@ async def next_page(bot, query):
     cache_save_getall(key, [f.file_id for f in files])
     temp.SHORT[query.from_user.id] = query.message.chat.id
     settings = await get_settings(query.message.chat.id)
-    if settings.get('button'):
-        btn = [
-            [
-                InlineKeyboardButton(text=f"🔗 {format_button_label(get_display_name(file), file.file_size)}", callback_data=f'file#{file.file_id}'),
-            ]
-            for file in files
-        ]
-        btn.insert(0,
-                   [
-                       InlineKeyboardButton(
-                           f'Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
-                       InlineKeyboardButton(
-                           "Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
-                       InlineKeyboardButton(
-                           "Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
-                   ]
-                   )
-        btn.insert(0,
-                   [
-                       InlineKeyboardButton(
-                           "ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
-                       InlineKeyboardButton(
-                           "Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
+    max_btn_val = 10 if settings.get("max_btn") else int(MAX_B_TN)
 
-                   ]
-                   )
-
-    else:
-        btn = []
-        btn.insert(0,
-                   [
-                       InlineKeyboardButton(
-                           f'Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
-                       InlineKeyboardButton(
-                           "Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
-                       InlineKeyboardButton(
-                           "Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
-                   ]
-                   )
-        btn.insert(0, [
-            InlineKeyboardButton(
-                "ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
-            InlineKeyboardButton("Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
+    btn = []
+    if active_chip:
+        btn.append([
+            InlineKeyboardButton(f"🎯 Filter: {active_chip}", callback_data=f"filter_info#{active_chip}"),
+            InlineKeyboardButton("🔄 Reset Filters", callback_data=f"reset_filter#{key}")
         ])
-    if ULTRA_FAST_MODE:
-        if 0 < offset <= 10:
-            off_set = 0
-        elif offset == 0:
-            off_set = None
-        else:
-            off_set = offset - 10
-        if n_offset == 0:
-            btn.append(
-                [InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"), InlineKeyboardButton(f"{math.ceil(int(offset)/10)+1}", callback_data="pages")]
-            )
-        elif off_set is None:
-            btn.append([InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(f"{math.ceil(int(offset)/10)+1}", callback_data="pages"), InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")])
-        else:
-            btn.append(
-                [
-                    InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
-                    InlineKeyboardButton(f"{math.ceil(int(offset)/10)+1}", callback_data="pages"),
-                    InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
-                ],
-            )
+    btn.append([
+        InlineKeyboardButton("ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
+        InlineKeyboardButton("Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
+    ])
+    btn.append([
+        InlineKeyboardButton("Qᴜᴀʟɪᴛʏ", callback_data=f"qualities#{key}"),
+        InlineKeyboardButton("Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
+        InlineKeyboardButton("Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
+    ])
+
+    if settings.get("button", True):
+        for file in files:
+            btn.append([
+                InlineKeyboardButton(text=f"🔗 {format_button_label(get_display_name(file), file.file_size)}", callback_data=f"file#{file.file_id}")
+            ])
+
+    # Dynamic pagination controls preserving filter & query context
+    page_no = math.ceil(int(offset) / max_btn_val) + 1
+    total_pages = math.ceil(int(total) / max_btn_val)
+    if 0 < offset <= max_btn_val:
+        off_set = 0
+    elif offset == 0:
+        off_set = None
     else:
-        try:
-            if settings['max_btn']:
-                if 0 < offset <= 10:
-                    off_set = 0
-                elif offset == 0:
-                    off_set = None
-                else:
-                    off_set = offset - 10
-                if n_offset == 0:
-                    btn.append([InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"), InlineKeyboardButton(
-                        f"{math.ceil(int(offset)/10)+1} / {math.ceil(total/10)}", callback_data="pages")])
-                elif off_set is None:
-                    btn.append([InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(
-                        f"{math.ceil(int(offset)/10)+1} / {math.ceil(total/10)}", callback_data="pages"), InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")])
-                else:
-                    btn.append(
-                        [
-                            InlineKeyboardButton(
-                                "⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
-                            InlineKeyboardButton(
-                                f"{math.ceil(int(offset)/10)+1} / {math.ceil(total/10)}", callback_data="pages"),
-                            InlineKeyboardButton(
-                                "ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
-                        ],
-                    )
-            else:
-                if 0 < offset <= int(MAX_B_TN):
-                    off_set = 0
-                elif offset == 0:
-                    off_set = None
-                else:
-                    off_set = offset - int(MAX_B_TN)
-                if n_offset == 0:
-                    btn.append([InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"), InlineKeyboardButton(
-                        f"{math.ceil(int(offset)/int(MAX_B_TN))+1} / {math.ceil(total/int(MAX_B_TN))}", callback_data="pages")])
-                elif off_set is None:
-                    btn.append([InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(
-                        f"{math.ceil(int(offset)/int(MAX_B_TN))+1} / {math.ceil(total/int(MAX_B_TN))}", callback_data="pages"), InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")])
-                else:
-                    btn.append(
-                        [
-                            InlineKeyboardButton(
-                                "⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
-                            InlineKeyboardButton(
-                                f"{math.ceil(int(offset)/int(MAX_B_TN))+1} / {math.ceil(total/int(MAX_B_TN))}", callback_data="pages"),
-                            InlineKeyboardButton(
-                                "ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
-                        ],
-                    )
-        except KeyError:
-            await save_group_settings(query.message.chat.id, 'max_btn', True)
-            if 0 < offset <= 10:
-                off_set = 0
-            elif offset == 0:
-                off_set = None
-            else:
-                off_set = offset - 10
-            if n_offset == 0:
-                btn.append(
-                    [InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"), InlineKeyboardButton(
-                        f"{math.ceil(int(offset)/10)+1} / {math.ceil(total/10)}", callback_data="pages")]
-                )
-            elif off_set is None:
-                btn.append([InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(
-                    f"{math.ceil(int(offset)/10)+1} / {math.ceil(total/10)}", callback_data="pages"), InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")])
-            else:
-                btn.append(
-                    [
-                        InlineKeyboardButton(
-                            "⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
-                        InlineKeyboardButton(
-                            f"{math.ceil(int(offset)/10)+1} / {math.ceil(total/10)}", callback_data="pages"),
-                        InlineKeyboardButton(
-                            "ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
-                    ],
-                )
-    if not settings["button"]:
+        off_set = offset - max_btn_val
+
+    if n_offset == 0:
+        if off_set is not None:
+            btn.append([
+                InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
+                InlineKeyboardButton(f"{page_no} / {total_pages}", callback_data="pages")
+            ])
+        else:
+            btn.append([
+                InlineKeyboardButton(f"{page_no} / {total_pages}", callback_data="pages")
+            ])
+    elif off_set is None:
+        btn.append([
+            InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"),
+            InlineKeyboardButton(f"{page_no} / {total_pages}", callback_data="pages"),
+            InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
+        ])
+    else:
+        btn.append([
+            InlineKeyboardButton("⋞ ʙᴀᴄᴋ", callback_data=f"next_{req}_{key}_{off_set}"),
+            InlineKeyboardButton(f"{page_no} / {total_pages}", callback_data="pages"),
+            InlineKeyboardButton("ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{n_offset}")
+        ])
+
+    search_title = raw_search or (search_input.get("search", "") if isinstance(search_input, dict) else str(search_input or ""))
+    dreamx_title = clean_search_text(search_title)
+
+    if not settings.get("button"):
         cur_time = datetime.now(pytz.timezone('Asia/Kolkata')).time()
         time_difference = timedelta(hours=cur_time.hour, minutes=cur_time.minute, seconds=(cur_time.second+(cur_time.microsecond/1000000))) - \
-            timedelta(hours=curr_time.hour, minutes=curr_time.minute, seconds=(
-                curr_time.second+(curr_time.microsecond/1000000)))
+            timedelta(hours=curr_time.hour, minutes=curr_time.minute, seconds=(curr_time.second+(curr_time.microsecond/1000000)))
         remaining_seconds = "{:.2f}".format(time_difference.total_seconds())
-        dreamx_title = clean_search_text(search)
-        cap = None
         try:
-            if settings['imdb']:
+            if settings.get("imdb"):
                 cap = await get_cap(settings, remaining_seconds, files, query, total, dreamx_title, offset)
-                if query.message.caption:
-                    try:
-                        await query.message.edit_caption(caption=cap, reply_markup=InlineKeyboardMarkup(btn), parse_mode=enums.ParseMode.HTML)
-                    except Exception as e:
-                        logger.exception(e)
-                        await query.message.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
-                else:
-                    await query.message.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
             else:
-                cap = await get_cap(settings, remaining_seconds, files, query, total, dreamx_title, offset+1)
-                await query.message.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
+                cap = await get_cap(settings, remaining_seconds, files, query, total, dreamx_title, offset + 1)
+            await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
         except Exception as e:
-
             logger.exception("Failed to send result: %s", e)
-        except MessageNotModified:
-            pass
-        # try:
-        #     await query.message.edit_text(text=cap, reply_markup=InlineKeyboardMarkup(btn), disable_web_page_preview=True, parse_mode=enums.ParseMode.HTML)
-        # except MessageNotModified:
-        #     pass
     else:
         try:
             await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btn))
         except MessageNotModified:
             pass
+        except Exception as e:
+            logger.warning("next_page edit_message_reply_markup error: %s", e)
     await query.answer()
 
 
@@ -709,8 +654,11 @@ async def filter_qualities_cb_handler(client: Client, query: CallbackQuery):
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
-        set_active_filter(key, "quality", None)
-        return await query.answer(f"🚫 No files found for {qual.upper()} with current filters 🚫", show_alert=True)
+        dreamx_title = clean_search_text(search)
+        btn = build_empty_filter_buttons(key, active_filter=active_chip)
+        cap = f"🚫 <b>No files found for <code>{dreamx_title}</code> with filter [{active_chip}]</b>\n\n💡 <i>Try selecting a different filter or reset filters below:</i>"
+        await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
+        return await query.answer(f"No results for {qual.upper()}", show_alert=False)
 
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
@@ -783,8 +731,11 @@ async def filter_languages_cb_handler(client: Client, query: CallbackQuery):
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
-        set_active_filter(key, "language", None)
-        return await query.answer(f"🚫 No files found in {lang.title()} with current filters 🚫", show_alert=True)
+        dreamx_title = clean_search_text(search)
+        btn = build_empty_filter_buttons(key, active_filter=active_chip)
+        cap = f"🚫 <b>No files found for <code>{dreamx_title}</code> with filter [{active_chip}]</b>\n\n💡 <i>Try selecting a different filter or reset filters below:</i>"
+        await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
+        return await query.answer(f"No results for {lang.title()}", show_alert=False)
 
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
@@ -859,8 +810,11 @@ async def filter_seasons_cb_handler(client: Client, query: CallbackQuery):
 
     files, offset, total_results = await get_search_results(chat_id, query_input, offset=0, filter=True)
     if not files:
-        set_active_filter(key, "season", None)
-        return await query.answer(f"🚫 No files found for {season_tag.upper()} with current filters 🚫", show_alert=True)
+        dreamx_title = clean_search_text(search)
+        btn = build_empty_filter_buttons(key, active_filter=active_chip)
+        cap = f"🚫 <b>No files found for <code>{dreamx_title}</code> with filter [{active_chip}]</b>\n\n💡 <i>Try selecting a different filter or reset filters below:</i>"
+        await edit_search_message(query, cap, InlineKeyboardMarkup(btn))
+        return await query.answer(f"No results for {season_tag.upper()}", show_alert=False)
 
     temp.GETALL[key] = files
     cache_save_getall(key, [f.file_id for f in files])
@@ -1906,7 +1860,11 @@ async def auto_filter(client, msg, spoll=False):
                 return
             if len(message.text) < 100:
                 message_text = message.text or ""
-                search = message_text.lower()
+                parsed = parse_user_query(message_text)
+                search = parsed.get("title") or message_text.strip()
+                search = re.sub(r"\s+", " ", search).strip()
+                if not search:
+                    return
 
                 stick_id = "CAACAgIAAxkBAAEPhm5o439f8A4sUGO2VcnBFZRRYxAxmQACtCMAAphLKUjeub7NKlvk2TYE"
                 keyboard = InlineKeyboardMarkup(
@@ -1917,21 +1875,18 @@ async def auto_filter(client, msg, spoll=False):
                 except Exception as e:
                     logger.exception("reply_sticker failed: %s", e)
 
-                find = search.split(" ")
-                search = ""
-                removes = ["in", "upload", "series", "full",
-                           "horror", "thriller", "mystery", "print", "file"]
-                for x in find:
-                    if x in removes:
-                        continue
-                    else:
-                        search = search + x + " "
-                search = re.sub(r"\b(pl(i|e)*?(s|z+|ease|se|ese|(e+)s(e)?)|((send|snd|giv(e)?|gib)(\sme)?)|movie(s)?|new|latest|bro|bruh|broh|helo|that|find|dubbed|link|venum|iruka|pannunga|pannungga|anuppunga|anupunga|anuppungga|anupungga|film|undo|kitti|kitty|tharu|kittumo|kittum|movie|any(one)|with\ssubtitle(s)?)", "", search, flags=re.IGNORECASE)
-                search = re.sub(r"\s+", " ", search).strip()
-                search = search.replace("-", " ")
-                search = search.replace(":", "")
+                key = f"{message.chat.id}-{message.id}"
+                user_id = message.from_user.id if message.from_user else 0
+                sess = GLOBAL_SESSION_MANAGER.get_or_create(key, message_text, message.chat.id, user_id)
+                if sess.active_filters:
+                    ACTIVE_FILTERS[key] = sess.active_filters.copy()
+                    cache_set_field(str(key), "buttons_query", json.dumps(sess.active_filters))
+                else:
+                    clear_active_filters(key)
 
-                files, offset, total_results = await get_search_results(message.chat.id, search, offset=0, filter=True)
+                query_input = sess.get_query_input() if sess.active_filters else search
+
+                files, offset, total_results = await get_search_results(message.chat.id, query_input, offset=0, filter=True)
 
                 settings = await get_settings(message.chat.id)
                 if not files:
@@ -1971,79 +1926,9 @@ async def auto_filter(client, msg, spoll=False):
         cache_save_getall(key, [f.file_id for f in files])
         temp.SHORT[message.from_user.id] = message.chat.id
 
-        if settings.get('button'):
-            btn = [
-                [
-                    InlineKeyboardButton(text=f"🔗 {format_button_label(get_display_name(file), file.file_size)}", callback_data=f'file#{file.file_id}'),
-                ]
-                for file in files
-            ]
-            btn.insert(0,
-                       [
-                           InlineKeyboardButton(
-                               f'Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
-                           InlineKeyboardButton(
-                               "Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
-                           InlineKeyboardButton(
-                               "Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
-                       ]
-                       )
-            btn.insert(0,
-                       [
-                           InlineKeyboardButton(
-                               "ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
-                           InlineKeyboardButton(
-                               "Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
-
-                       ])
-        else:
-            btn = []
-            btn.insert(0,
-                       [
-                           InlineKeyboardButton(
-                               f'Qᴜᴀʟɪᴛʏ', callback_data=f"qualities#{key}"),
-                           InlineKeyboardButton(
-                               "Lᴀɴɢᴜᴀɢᴇ", callback_data=f"languages#{key}"),
-                           InlineKeyboardButton(
-                               "Sᴇᴀsᴏɴ",  callback_data=f"seasons#{key}")
-                       ]
-                       )
-            btn.insert(0,
-                       [
-                           InlineKeyboardButton(
-                               "ʀᴇᴍᴏᴠᴇ ᴀᴅs", url=f"https://t.me/{temp.U_NAME}?start=premium"),
-                           InlineKeyboardButton(
-                               "Sᴇɴᴅ Aʟʟ", callback_data=f"sendfiles#{key}")
-                       ])
-
-        if offset != "":
-            req = message.from_user.id if message.from_user else 0
-            if ULTRA_FAST_MODE:
-                btn.append(
-                    [InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(
-                        text="1", callback_data="pages"), InlineKeyboardButton(text="ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{offset}")]
-                )
-            else:
-                try:
-                    if settings['max_btn']:
-                        btn.append(
-                            [InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(
-                                text=f"1/{math.ceil(int(total_results)/10)}", callback_data="pages"), InlineKeyboardButton(text="ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{offset}")]
-                        )
-                    else:
-                        btn.append(
-                            [InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(
-                                text=f"1/{math.ceil(int(total_results)/int(MAX_B_TN))}", callback_data="pages"), InlineKeyboardButton(text="ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{offset}")]
-                        )
-                except KeyError:
-                    await save_group_settings(message.chat.id, 'max_btn', True)
-                    btn.append(
-                        [InlineKeyboardButton("ᴘᴀɢᴇ", callback_data="pages"), InlineKeyboardButton(
-                            text=f"1/{math.ceil(int(total_results)/10)}", callback_data="pages"), InlineKeyboardButton(text="ɴᴇxᴛ ⋟", callback_data=f"next_{req}_{key}_{offset}")]
-                    )
-        else:
-            btn.append([InlineKeyboardButton(
-                text="↭ ɴᴏ ᴍᴏʀᴇ ᴘᴀɢᴇꜱ ᴀᴠᴀɪʟᴀʙʟᴇ ↭", callback_data="pages")])
+        active_chip = sess.get_filter_chip() if 'sess' in locals() and sess else get_filter_chip_label(get_active_filters(key))
+        req = message.from_user.id if message.from_user else 0
+        btn = build_search_buttons(files, key, offset, total_results, req, settings, active_filter=active_chip)
 
         if settings.get('imdb'):
             imdb = await get_posterx(search, file=(files[0]).file_name) if TMDB_POSTERS else await get_poster(search, file=(files[0]).file_name)

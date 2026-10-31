@@ -189,8 +189,22 @@ AUTH_REQ_CHANNELS = [int(ch) for ch in auth_req_channels.split() if ch and id_pa
 AUTH_CHANNELS = [int(ch) for ch in auth_channels.split() if ch and id_pattern.match(ch)]
 REQST_CHANNEL = int(reqst_channel) if reqst_channel and id_pattern.search(reqst_channel) else None
 SUPPORT_CHAT_ID = int(support_chat_id) if support_chat_id and id_pattern.search(support_chat_id) else None
-LANGUAGES = {"ᴍᴀʟᴀʏᴀʟᴀᴍ":"mal","ᴛᴀᴍɪʟ":"tam","ᴇɴɢʟɪsʜ":"eng","ʜɪɴᴅɪ":"hin","ᴛᴇʟᴜɢᴜ":"tel","ᴋᴀɴɴᴀᴅᴀ":"kan","ɢᴜᴊᴀʀᴀᴛɪ":"guj","ᴍᴀʀᴀᴛʜɪ":"mar","ᴘᴜɴᴊᴀʙɪ":"pun"}
-QUALITIES = ["360P", "480P", "720P", "1080P", "1440P", "2160P", "4K"]
+LANGUAGES = {
+    "ʜɪɴᴅɪ": "hin",
+    "ᴛᴀᴍɪʟ": "tam",
+    "ᴋᴀɴɴᴀᴅᴀ": "kan",
+    "ᴛᴇʟᴜɢᴜ": "tel",
+    "ᴍᴀʟᴀʏᴀʟᴀᴍ": "mal",
+    "ᴇɴɢʟɪsʜ": "eng",
+    "ᴘᴜɴᴊᴀʙɪ": "pun",
+    "ʙᴇɴɢᴀʟɪ": "ben",
+    "ᴍᴀʀᴀᴛʜɪ": "mar",
+    "ɢᴜᴊᴀʀᴀᴛɪ": "guj",
+    "ᴜʀᴅᴜ": "urd",
+    "ᴋᴏʀᴇᴀɴ": "kor",
+    "ᴊᴀᴘᴀɴᴇsᴇ": "jpn",
+}
+QUALITIES = ["480P", "720P", "1080P", "2160P", "4K"]
 
 SEASON_COUNT = 12
 SEASONS = [f"S{str(i).zfill(2)}" for i in range(1, SEASON_COUNT + 1)]
